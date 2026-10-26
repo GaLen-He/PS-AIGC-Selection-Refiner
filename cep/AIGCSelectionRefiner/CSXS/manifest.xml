@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<ExtensionManifest Version="7.0" ExtensionBundleId="com.company.aigc.selection.refiner.bundle" ExtensionBundleVersion="0.5.12" ExtensionBundleName="AIGC Selection Refiner" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<ExtensionManifest Version="7.0" ExtensionBundleId="com.company.aigc.selection.refiner.bundle" ExtensionBundleVersion="0.5.30" ExtensionBundleName="AIGC选区提交/整图分层" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <ExtensionList>
-    <Extension Id="com.company.aigc.selection.refiner" Version="0.5.12" />
+    <Extension Id="com.company.aigc.selection.refiner" Version="0.5.30" />
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>
-      <Host Name="PHXS" Version="[16.0,99.9]" />
-      <Host Name="PHSP" Version="[16.0,99.9]" />
+      <Host Name="PHXS" Version="[25.0,99.9]" />
+      <Host Name="PHSP" Version="[25.0,99.9]" />
     </HostList>
     <LocaleList>
       <Locale Code="All" />
@@ -33,7 +33,7 @@
         </Lifecycle>
         <UI>
           <Type>Panel</Type>
-          <Menu>AIGC 选区细化</Menu>
+          <Menu>AIGC选区提交/整图分层</Menu>
           <Geometry>
             <Size>
               <Width>380</Width>

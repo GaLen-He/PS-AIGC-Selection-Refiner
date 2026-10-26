@@ -19,17 +19,20 @@ var referenceLoading = false;
 var layerBusy = false;
 var lastLayerRun = null;
 var hostQueue = Promise.resolve();
-var quietPlacementGuard = null;
+var backgroundBridge = null;
+var backgroundReturn = null;
 var LAYER_CONCURRENCY = 8;
 var GUIDE_COLORS = ["#ff4d4f", "#40a9ff", "#73d13d", "#ffc53d", "#b37feb", "#36cfc9", "#ff85c0", "#ffa940"];
 var GUIDE_MAX_SIZE = 768;
 var guide = { docId: null, docName: "", source: null, image: null, width: 0, height: 0, masks: {}, tool: "brush", last: null, painting: false };
 var imeCompositionActive = false;
-var textInputNeedsRecovery = false;
-var textInputFocusRevision = 0;
-var textInputListenersBound = false;
 var resumingTasks = {};
 var volatilePendingTasks = [];
+var taskOldestFirst = false;
+var pendingCapacity = 0;
+var MAX_PENDING_TASKS = 20;
+var recoveryStore = null;
+var recoveryStoreInitialized = false;
 var recoveryTimer = null;
 var recoveryClosing = false;
 var RECOVERY_INTERVAL_MS = 30000;
@@ -37,6 +40,7 @@ window.addEventListener("beforeunload", function () {
   recoveryClosing = true;
   if (recoveryTimer !== null) clearTimeout(recoveryTimer);
   recoveryTimer = null;
+  if (backgroundBridge) backgroundBridge.close().catch(function () {});
 });
 function getElement(id) {
   return document.getElementById(id);
@@ -45,44 +49,7 @@ function getElement(id) {
 function isTextEditingTarget(target) {
   if (!target) return false;
   var tagName = String(target.tagName || "").toLowerCase();
-  if (target.disabled || target.readOnly) return false;
-  if (tagName === "input") return /^(text|search|url|tel|email|password|number)$/.test(String(target.type || "text").toLowerCase());
-  return tagName === "textarea" || target.isContentEditable === true;
-}
-
-function setTextKeyboardInterest(editing) {
-  try {
-    if (!csInterface.registerKeyEventsInterest) return;
-    var interests = [];
-    if (editing) {
-      var codes = [8, 9, 13, 20, 21, 25, 27, 28, 29, 32, 229];
-      var ranges = [[33, 46], [48, 90], [96, 111], [186, 226]];
-      ranges.forEach(function (range) {
-        for (var code = range[0]; code <= range[1]; code += 1) codes.push(code);
-      });
-      codes.forEach(function (code) { interests.push({ keyCode: code }); });
-    }
-    csInterface.registerKeyEventsInterest(editing ? JSON.stringify(interests) : "");
-  } catch (error) {}
-}
-
-function recoverTextInput(target, revision) {
-  setTimeout(function () {
-    if (revision !== textInputFocusRevision || !isTextEditingTarget(target) || isImeComposing() || document.activeElement !== target) return;
-    if (!document.hasFocus || !document.hasFocus() || !document.documentElement.contains(target)) return;
-    if (target.isContentEditable) return;
-    var start = target.selectionStart;
-    var end = target.selectionEnd;
-    var direction = target.selectionDirection;
-    var top = target.scrollTop;
-    var left = target.scrollLeft;
-    target.blur();
-    target.focus();
-    try { if (typeof start === "number" && typeof end === "number") target.setSelectionRange(start, end, direction || "none"); } catch (error) {}
-    target.scrollTop = top;
-    target.scrollLeft = left;
-    textInputNeedsRecovery = false;
-  }, 0);
+  return tagName === "input" || tagName === "textarea" || target.isContentEditable === true;
 }
 
 function isImeComposing(event) {
@@ -92,12 +59,6 @@ function isImeComposing(event) {
 function bindTextInputIme(target) {
   if (!isTextEditingTarget(target) || target.getAttribute("data-ime-bound") === "true") return;
   target.setAttribute("data-ime-bound", "true");
-  target.addEventListener("focus", function () {
-    setTextKeyboardInterest(true);
-  });
-  target.addEventListener("mouseup", function () {
-    if (textInputNeedsRecovery) recoverTextInput(target, textInputFocusRevision);
-  });
   target.addEventListener("compositionstart", function (event) {
     imeCompositionActive = true;
     event.stopPropagation();
@@ -120,29 +81,14 @@ function bindTextInputIme(target) {
   });
   target.addEventListener("blur", function () {
     imeCompositionActive = false;
-    setTextKeyboardInterest(false);
   });
 }
 
 function enableTextInputIme() {
   var fields = document.querySelectorAll("input, textarea, [contenteditable='true']");
   Array.prototype.forEach.call(fields, bindTextInputIme);
-  if (textInputListenersBound) return;
-  textInputListenersBound = true;
   document.addEventListener("focusin", function (event) {
     bindTextInputIme(event.target);
-    setTextKeyboardInterest(isTextEditingTarget(event.target));
-  });
-  document.addEventListener("mousedown", function () { textInputFocusRevision += 1; }, true);
-  window.addEventListener("blur", function () {
-    imeCompositionActive = false;
-    textInputNeedsRecovery = true;
-    textInputFocusRevision += 1;
-    setTextKeyboardInterest(false);
-  });
-  window.addEventListener("focus", function () {
-    textInputNeedsRecovery = true;
-    setTextKeyboardInterest(isTextEditingTarget(document.activeElement));
   });
 }
 
@@ -183,37 +129,152 @@ function updateControls() {
   getElement("guideButton").disabled = layerBusy;
   getElement("retryLayersButton").hidden = !hasRetry;
   getElement("retryLayersButton").disabled = connecting || !connected || layerBusy;
+  var recoveryButton = getElement("recoverTasksButton");
+  if (recoveryButton) {
+    var pendingCount = loadPendingTasks().length;
+    recoveryButton.hidden = !pendingCount;
+    recoveryButton.disabled = connecting;
+    recoveryButton.textContent = "继续取回";
+  }
+  renderTaskProgress();
+}
+
+function renderTaskProgress() {
+  if (typeof document === "undefined" || typeof AIGCTaskProgress === "undefined") return;
+  AIGCTaskProgress.render(document, loadPendingTasks(), retryPendingTasks, taskRunningMap(), {
+    oldestFirst: taskOldestFirst, dismiss: dismissPendingTasks
+  });
+}
+
+function taskRunningMap() {
+  var running = Object.assign({}, resumingTasks);
+  if (layerBusy) loadPendingTasks().forEach(function (task) { if (task.type === "layer") running[task.id] = true; });
+  return running;
+}
+
+function setTaskPanelOpen(open) {
+  getElement("taskProgressOverlay").hidden = !open;
+  getElement("taskProgressButton").setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) renderTaskProgress();
+}
+
+function setTaskPanelNotice(message, kind) {
+  setStatus(message, kind);
+  if (typeof document === "undefined") return;
+  var notice = getElement("taskProgressNotice");
+  if (!notice) return;
+  notice.hidden = false;
+  notice.textContent = message;
+  notice.className = "status" + (kind ? " " + kind : "");
+}
+
+function dismissPendingTasks(taskId) {
+  var tasks = loadPendingTasks();
+  var removable = AIGCTaskProgress.removableIds(tasks, taskRunningMap()).filter(function (identity) { return !taskId || identity === taskId; });
+  if (!removable.length || !window.confirm("清除 " + removable.length + " 个失败/暂停任务的追踪？\n不会删除缓存图片或 PSD 图层，也不会取消平台任务。清除后不再自动取回。")) return;
+  try {
+    tasks = loadPendingTasks();
+    var eligible = AIGCTaskProgress.removableIds(tasks, taskRunningMap());
+    removable = removable.filter(function (identity) { return eligible.indexOf(identity) >= 0; });
+    savePendingTasks(tasks.filter(function (task) { return removable.indexOf(task.id) < 0; }));
+    if (loadPendingTasks().some(function (task) { return removable.indexOf(task.id) >= 0; })) {
+      throw new Error("任务存档未能清理，请检查配置目录权限；暂停任务仍保留。");
+    }
+    if (lastLayerRun && (lastLayerRun.taskIds || []).some(function (identity) { return removable.indexOf(identity) >= 0; })) lastLayerRun = null;
+    updateControls();
+  } catch (error) {
+    setStatus(safeError(error), "error");
+    renderTaskProgress();
+  }
+}
+
+function reservePendingCapacity(count) {
+  if (!Number.isInteger(count) || count < 1 || loadPendingTasks().length + pendingCapacity + count > MAX_PENDING_TASKS) {
+    throw new Error("最多同时保留 20 个待取回任务，请先清除暂停任务或等待现有任务完成；本次未提交生图。");
+  }
+  pendingCapacity += count;
+  return { remaining: count };
+}
+
+function releasePendingCapacity(reservation, count) {
+  if (!reservation) return;
+  var released = count === undefined ? reservation.remaining : Math.min(reservation.remaining, count);
+  pendingCapacity -= released;
+  reservation.remaining -= released;
 }
 
 function setBusy(isBusy) {
   connecting = isBusy;
   updateControls();
 }
-function loadSettings() {
+
+function keepPanelAlive() {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
-  } catch (error) {
-    return {};
+    csInterface.dispatchEvent({ type: "com.adobe.PhotoshopPersistent", scope: "APPLICATION",
+      extensionId: csInterface.getExtensionID(), data: "" });
+  } catch (error) {}
+}
+
+function getRecoveryStore() {
+  if (recoveryStoreInitialized) return recoveryStore;
+  recoveryStoreInitialized = true;
+  if (typeof process === "undefined" || !process.env.APPDATA || !window.__adobe_cep__) return null;
+  try {
+    var host = JSON.parse(window.__adobe_cep__.getHostEnvironment());
+    var identity = String(host.appId || "PHXS") + "_" + String(host.appVersion || "unknown");
+    identity = identity.replace(/[^a-z0-9_.-]/gi, "_");
+    recoveryStore = require(path.join(csInterface.getExtensionPath(), "js", "recovery-state.js")).createStore(
+      path.join(process.env.APPDATA, "Adobe", "AIGCSelectionRefiner", "recovery-state", identity));
+  } catch (error) { recoveryStore = null; }
+  return recoveryStore;
+}
+
+function readRecoveryState(name, fallback) {
+  var store = getRecoveryStore();
+  if (store) {
+    try { return store.read(name, fallback); } catch (error) {}
   }
+  return fallback;
+}
+
+function writeRecoveryState(name, value, storageKey) {
+  var persisted = false;
+  var store = getRecoveryStore();
+  if (store) {
+    try { store.write(name, value); persisted = true; } catch (error) {}
+  }
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(storageKey, JSON.stringify(value));
+      persisted = true;
+    }
+  } catch (error) {}
+  if (!persisted && (store || typeof localStorage !== "undefined")) throw new Error("任务存档写入失败，请检查用户配置目录权限和磁盘空间；不要重复提交。");
+}
+
+function loadSettings() {
+  var settings = {};
+  try {
+    settings = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+  } catch (error) {}
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) settings = {};
+  return readRecoveryState("settings", settings);
 }
 
 function loadPendingTasks() {
   var tasks;
-  if (typeof localStorage === "undefined") return volatilePendingTasks.slice();
   try {
     tasks = JSON.parse(localStorage.getItem(TASK_STORAGE_KEY) || "[]");
   } catch (error) {
-    tasks = [];
+    tasks = volatilePendingTasks.slice();
   }
-  return tasks && tasks.slice ? tasks : [];
+  return readRecoveryState("tasks", Array.isArray(tasks) ? tasks : []);
 }
 
 function savePendingTasks(tasks) {
-  if (typeof localStorage === "undefined") {
-    volatilePendingTasks = (tasks || []).slice();
-    return;
-  }
-  localStorage.setItem(TASK_STORAGE_KEY, JSON.stringify(tasks || []));
+  volatilePendingTasks = (tasks || []).slice();
+  writeRecoveryState("tasks", tasks || [], TASK_STORAGE_KEY);
+  renderTaskProgress();
 }
 
 function upsertPendingTask(task) {
@@ -235,18 +296,57 @@ function removePendingTask(taskId) {
 
 function markTaskForRecovery(task, error) {
   if (!task || !task.traceId) return false;
-  task.autoResume = AIGCGateway.isRetryableError(error) && (task.stage === "waiting" || task.stage === "downloading");
+  task.recoveryBlocked = !!(error && error.recoveryBlocked);
+  task.lastRecoveryError = { message: safeError(error), phase: error && error.phase || task.stage,
+    number: error && typeof error.number === "number" ? error.number : null,
+    code: error && error.code || null, stripe: error && error.stripe, pixelInfo: error && error.pixelInfo || null,
+    compatibilityError: error && error.compatibilityError ? safeError({ message: error.compatibilityError }) : "",
+    compatibilityPhase: error && error.compatibilityPhase || "",
+    rollbackError: error && error.rollbackError ? safeError({ message: error.rollbackError }) : "", at: Date.now() };
+  task.recoveryMessage = "";
+  var returning = task.stage === "placing";
+  var recoverable = !task.recoveryBlocked && !(error && error.platformFailed) &&
+    (returning || !!(error && error.backgroundUnavailable) || AIGCGateway.isRetryableError(error));
+  task.recoveryAttempts = recoverable ? (task.recoveryAttempts || 0) + 1 : task.recoveryAttempts || 0;
+  task.recoveryExhausted = returning && !(error && error.backgroundUnavailable) && task.recoveryAttempts >= 5;
+  task.autoResume = recoverable && !task.recoveryExhausted;
+  task.nextRecoveryAt = Date.now() + Math.min(RECOVERY_INTERVAL_MS * Math.pow(2, Math.max(0, task.recoveryAttempts - 1)), 300000);
   upsertPendingTask(task);
   return task.autoResume;
 }
 
+function taskCanAutoResume(task) {
+  if (!task || !task.traceId || task.recoveryBlocked || task.recoveryExhausted) return false;
+  if (task.autoResume !== false) return true;
+  var source = task.type === "layer" ? task.exportInfo : task.context;
+  var slot = task.type === "layer" ? task.slot : source && source.slot;
+  return !task.lastRecoveryError && task.stage === "placing" && !!(slot && slot.reservationId &&
+    source && source.source && source.source.backgroundSessionId);
+}
+
+function preparePendingRecovery() {
+  loadPendingTasks().forEach(function (task) {
+    if (!task || !task.id || !task.traceId || task.recoveryBlocked) return;
+    task.autoResume = true;
+    task.recoveryAttempts = 0;
+    task.recoveryExhausted = false;
+    task.nextRecoveryAt = 0;
+    upsertPendingTask(task);
+  });
+}
+
 function scheduleTaskRecovery(client) {
-  if (recoveryClosing || recoveryTimer !== null || !client || !loadPendingTasks().some(function (task) { return task && task.traceId && task.autoResume; })) return;
+  if (recoveryClosing || recoveryTimer !== null || !client) return;
+  var tasks = loadPendingTasks().filter(function (task) {
+    return taskCanAutoResume(task) && !resumingTasks[task.id] && !(layerBusy && task.type === "layer");
+  });
+  if (!tasks.length) return;
+  var due = Math.min.apply(null, tasks.map(function (task) { return task.nextRecoveryAt || Date.now() + RECOVERY_INTERVAL_MS; }));
   recoveryTimer = setTimeout(function () {
     recoveryTimer = null;
     if (recoveryClosing) return;
     return resumePendingTasks(gatewayClient || client, true);
-  }, RECOVERY_INTERVAL_MS);
+  }, Math.max(1, due - Date.now()));
 }
 
 function networkRetryReporter(report) {
@@ -256,8 +356,86 @@ function networkRetryReporter(report) {
 }
 
 function taskFailureMessage(error, task) {
-  if (task && task.autoResume) return "连接暂时中断，任务已保存，将自动继续查询和取回，无需重启或重复提交。\n" + safeError(error);
-  return safeError(error) + (task && !error.platformFailed ? "\n任务已保存，可重新连接平台继续取回。" : "");
+  var detail = safeError(error) + (error && error.phase ? "（阶段：" + error.phase + "）" : "");
+  if (error && error.compatibilityError) detail += "\n兼容写入 [" + (error.compatibilityPhase || "unknown") + "] " + safeError({ message: error.compatibilityError });
+  if (error && error.rollbackError) detail += "\n回滚失败：" + safeError({ message: error.rollbackError });
+  if (error && error.pixelInfo) {
+    var info = error.pixelInfo;
+    detail += "\n像素 " + info.width + "×" + info.height + " / " + (info.components === 3 ? "RGB" : "RGBA") +
+      "；目标图层 " + info.layerId + "；位置 " + info.left + "," + info.top;
+  }
+  if (task && task.recoveryBlocked) return "原任务回贴条件已变化，已暂停以免错贴。结果已保留；原文档及预建结果层仍有效时可点击「继续取回」，重启 PS 或没有预建层的旧任务不能自动认领。\n" + detail +
+    (task.result && task.result.path ? "\n保留图片：" + task.result.path : "");
+  if (task && task.recoveryExhausted) return "回贴连续失败，已停止自动重试以免打断操作。结果已保留，点击「继续取回」可重试，无需重新生图。\n" + detail;
+  if (error && error.backgroundUnavailable) return "后台助手暂未连接，任务和结果已保留；助手连接后会自动重试，不会切换你的文档。\n" + safeError(error);
+  if (task && task.autoResume) return "任务和结果已保存，将自动继续取回，无需重启或重复提交。\n" + detail;
+  return detail + (task && !(error && error.platformFailed) ? "\n任务已保存，点击「继续取回」重试，不会重新生图。" : "");
+}
+
+function reconcileTaskCache(task) {
+  function exists(filePath) {
+    try { return !!filePath && fs.statSync(filePath).isFile() && fs.statSync(filePath).size > 0; }
+    catch (error) { return false; }
+  }
+  if (task.result && exists(task.result.path)) return;
+  var processedMissing = !!task.result;
+  task.result = null;
+  if (task.stage === "waiting") return;
+  if (exists(task.downloadedPath)) {
+    task.stage = "downloaded";
+  } else if (task.type !== "layer" && !processedMissing && exists(task.resultPath) &&
+    (task.stage === "restored" || task.stage === "prepared" || task.stage === "placing")) {
+    task.stage = "restored";
+  } else {
+    task.downloadedPath = "";
+    task.stage = "downloading";
+    if (task.type !== "layer") task.resultPath = path.join(os.tmpdir(), "aigc-result-recovered-" + Date.now() + "-" + Math.random().toString(36).slice(2) + ".png");
+  }
+  if (!exists(task.croppedPath)) task.croppedPath = "";
+  if (!exists(task.cleanupPath)) task.cleanupPath = "";
+  upsertPendingTask(task);
+}
+
+function retryPendingTasks(taskId) {
+  if (typeof taskId !== "string") taskId = "";
+  var tasks = loadPendingTasks().filter(function (task) { return task && (!taskId || task.id === taskId); });
+  var running = taskRunningMap();
+  var eligible = tasks.filter(function (task) { return !running[task.id]; });
+  if (recoveryClosing || !eligible.length) {
+    setTaskPanelNotice(recoveryClosing ? "面板正在关闭，请重新打开后取回。" : tasks.length ? "任务正在取回，请稍候；不会重复执行。" : "该任务已完成或已清除。", "working");
+    return Promise.resolve([]);
+  }
+  function hasLocalResult(task) {
+    try { return !!(task.result && task.result.path && fs.statSync(task.result.path).isFile() && fs.statSync(task.result.path).size > 0); }
+    catch (error) { return false; }
+  }
+  if (!gatewayClient) eligible = eligible.filter(hasLocalResult);
+  if (!eligible.length) {
+    setTaskPanelNotice("请先连接平台，再取回已生成的任务；不会重新提交生图。", "error");
+    return Promise.resolve([]);
+  }
+  eligible.forEach(function (task) {
+    task.recoveryAttempts = 0;
+    task.recoveryExhausted = false;
+    task.recoveryBlocked = false;
+    task.nextRecoveryAt = 0;
+    task.autoResume = true;
+    task.lastRecoveryError = null;
+    task.recoveryMessage = "正在重新取回…（不会重新生图）";
+    upsertPendingTask(task);
+  });
+  setTaskPanelNotice("正在重新取回 " + eligible.length + " 个任务…" + (eligible.length < tasks.length ? "其他任务正在执行或需要连接平台。" : ""), "working");
+  var identities = eligible.map(function (task) { return task.id; });
+  return resumePendingTasks(gatewayClient || {}, true, identities, !gatewayClient).then(function (results) {
+    var remaining = loadPendingTasks().filter(function (task) { return identities.indexOf(task.id) >= 0; });
+    var failed = remaining.filter(function (task) { return !!task.lastRecoveryError; });
+    if (failed.length) setTaskPanelNotice("取回失败，结果仍保留。\n" + taskFailureMessage(failed[0].lastRecoveryError, failed[0]), "error");
+    else if (!remaining.length) setTaskPanelNotice("本次取回已结束，请查看原 PSD 的结果图层；已返回的任务自动移除。", "success");
+    return results;
+  }).catch(function (error) {
+    setTaskPanelNotice("取回未能启动：" + safeError(error), "error");
+    return [];
+  });
 }
 
 function pendingTaskPathMap() {
@@ -276,6 +454,7 @@ function pendingTaskPathMap() {
     protect(task.croppedPath);
     protect(context.imagePath);
     protect(context.uploadPath);
+    protect(context.selectionMaskPath);
     protect(exportInfo.imagePath);
     if (task.result) protect(task.result.path);
   });
@@ -295,15 +474,24 @@ function isPendingTaskPath(filePath, protectedPaths) {
 
 function saveSettings(saveConnection) {
   var previous = loadSettings();
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+  writeRecoveryState("settings", {
     platformUrl: saveConnection === true ? getElement("platformUrl").value : (previous.platformUrl || getElement("platformUrl").value),
     apiKey: saveConnection === true ? getElement("apiKey").value : (previous.apiKey || ""),
     model: getElement("modelSelect").value || previous.model || "",
     layerTemplate: getElement("layerTemplate").value,
     layerList: getElement("layerList").value,
     prompt: getElement("prompt").value,
-    cleanupText: getElement("cleanupText").checked
-  }));
+    cleanupText: false,
+    watermarkMargin: getElement("watermarkMargin").checked,
+    watermarkAxis: getElement("watermarkAxis").value
+  }, STORAGE_KEY);
+}
+
+var WATERMARK_MARGIN = 0.08;
+
+function watermarkMargin() {
+  if (!getElement("watermarkMargin").checked) return 0;
+  return getElement("watermarkAxis").value === "horizontal" ? { x: WATERMARK_MARGIN, y: 0 } : { x: 0, y: WATERMARK_MARGIN };
 }
 
 function setConnectionPanelOpen(open) {
@@ -371,36 +559,147 @@ function cleanupStaleTempFiles() {
 }
 
 function evalHost(method, args) {
-  var run = function () {
-    var target = document.activeElement;
-    var revision = textInputFocusRevision;
-    var operation;
-    if (method !== "placeResult" && method !== "placeLayeredResult" && method !== "discardSelection") operation = evalHostNow(method, args);
-    else {
-      var guard = getQuietPlacementGuard();
-      operation = guard ? guard.run(function () { return evalHostNow(method, args); }) : evalHostNow(method, args);
+  return Promise.resolve().then(function () {
+    if (method === "placeResult") {
+      return getBackgroundReturn().selection({ documentId: args[3], selection: args[1], source: args[5], artboard: args[6], selectionMaskPath: args[8], slot: args[9] },
+        { path: args[0] }, args[7]);
     }
-    return operation.then(function (value) {
-      if (isTextEditingTarget(target)) recoverTextInput(target, revision);
-      return value;
-    }, function (error) {
-      if (isTextEditingTarget(target)) recoverTextInput(target, revision);
-      throw error;
-    });
+    if (method === "placeLayeredResult") {
+      return getBackgroundReturn().layers(args[0], { documentId: args[1], source: args[3], artboard: args[5] }, args[2], args[4]);
+    }
+    if (method === "exportDocument") {
+      var bridge = getBackgroundBridge();
+      var sessionId;
+      return bridge.waitReady().then(function () {
+        sessionId = bridge.sessionId();
+        if (!sessionId) throw new Error("后台助手会话身份缺失，未提交生图。");
+        return queueHost(method, args);
+      }).then(function (exported) {
+        if (bridge.sessionId() !== sessionId) throw new Error("导出期间助手会话已变化，请重新提交。");
+        exported.source.backgroundSessionId = sessionId;
+        return exported;
+      });
+    }
+    return queueHost(method, args);
+  });
+}
+
+function queueHost(method, args) {
+  var run = function () {
+    return evalHostNow(method, args);
   };
   var result = hostQueue.then(run, run);
   hostQueue = result.catch(function () {});
   return result;
 }
 
-function getQuietPlacementGuard() {
-  if (quietPlacementGuard) return quietPlacementGuard;
+function getBackgroundBridge() {
+  if (backgroundBridge) return backgroundBridge;
   try {
-    if (!window.AIGCQuietPlacement || !csInterface.getExtensionPath) return null;
-    quietPlacementGuard = window.AIGCQuietPlacement.createGuard({ helperPath: path.join(csInterface.getExtensionPath(), "host", "quiet-placement.exe") });
-    window.addEventListener("beforeunload", function () { quietPlacementGuard.releaseActive(); });
-    return quietPlacementGuard;
-  } catch (error) { return null; }
+    var extensionPath = csInterface.getExtensionPath();
+    var dataRoot = process.env.APPDATA;
+    if (!dataRoot) throw new Error("未找到 Windows 用户配置目录，请检查当前账户环境。");
+    var config = JSON.parse(fs.readFileSync(path.join(dataRoot, "Adobe", "AIGCSelectionRefiner", "bridge-token.json"), "utf8").replace(/^\uFEFF/, ""));
+    backgroundBridge = require(path.join(extensionPath, "js", "background-bridge.js")).createBridge({ secret: config.token,
+      onReady: function () { if (!recoveryClosing && gatewayClient) resumePendingTasks(gatewayClient, true); } });
+    return backgroundBridge;
+  } catch (error) {
+    if (error.code === "ENOENT") error = new Error("后台助手安装不完整，请完整解压并运行 0.5.30 安装脚本；不会切换文档回贴。");
+    error.backgroundUnavailable = true;
+    throw error;
+  }
+}
+
+function getBackgroundReturn() {
+  if (!backgroundReturn) backgroundReturn = require(path.join(csInterface.getExtensionPath(), "js", "background-return.js")).createReturn({
+    bridge: getBackgroundBridge(), renderPixels: renderReturnPixels
+  });
+  return backgroundReturn;
+}
+
+function renderReturnPixels(filePath, target, mode) {
+  return loadImageElement(filePath).then(function (image) {
+    var canvas = document.createElement("canvas");
+    canvas.width = target.width;
+    canvas.height = target.height;
+    var drawing = canvas.getContext("2d");
+    var scale = mode === "cover" ? Math.max(target.width / image.width, target.height / image.height) : Math.min(target.width / image.width, target.height / image.height);
+    var width = image.width * scale;
+    var height = image.height * scale;
+    drawing.imageSmoothingQuality = "high";
+    drawing.drawImage(image, (target.width - width) / 2, (target.height - height) / 2, width, height);
+    var pixels = drawing.getImageData(0, 0, target.width, target.height).data;
+    return Buffer.from(pixels.buffer, pixels.byteOffset, pixels.byteLength);
+  });
+}
+
+function exportCapturedSelection(layerName, reservationId) {
+  return exportPixelSubmission({ selection: true, reservation: { name: layerName, id: reservationId } });
+}
+
+function exportPixelSubmission(options) {
+  var bridge = getBackgroundBridge();
+  var sessionId = bridge.sessionId();
+  if (!sessionId) return Promise.reject(new Error("后台助手尚未连接，未提交生图。"));
+  var base = path.join(os.tmpdir(), "aigc-selection-" + require('crypto').randomBytes(16).toString('hex'));
+  var pixelsPath = base + ".rgba";
+  var imagePath = base + ".png";
+  var exported;
+  return evalHost("prepareSubmission", [options]).then(function (context) {
+    exported = context;
+    if (bridge.sessionId() !== sessionId) throw new Error("取图期间助手会话已变化，未提交生图。");
+    if (options.reservation) {
+      var slots = options.reservation.names ? exported.slots : [exported.slot];
+      var names = options.reservation.names || [options.reservation.name];
+      if (!slots || slots.length !== names.length || slots.some(function (slot, index) {
+        return !slot || !slot.layerId || slot.reservationId !== options.reservation.id || slot.name !== names[index] ||
+          options.selection && !slot.maskPrepared;
+      })) throw new Error("原选区目标图层或蒙版未准备好，未提交生图。");
+    }
+    exported.source.backgroundSessionId = sessionId;
+    return bridge.snapshot(exported, pixelsPath);
+  }).then(function (snapshot) {
+    if (bridge.sessionId() !== sessionId) throw new Error("取图期间助手会话已变化，未提交生图。");
+    exported.timing = Object.assign(exported.timing || {}, snapshot.timing);
+    return preparePixelSnapshot(snapshot, exported, imagePath);
+  }).then(function () {
+    exported.imagePath = imagePath;
+    exported.imagePreparation = null;
+    console.info("AIGC submission timing", exported.timing);
+    return exported;
+  }).catch(function (error) { removeFile(imagePath); throw error; })
+    .then(function (result) { removeFile(pixelsPath); return result; }, function (error) { removeFile(pixelsPath); throw error; });
+}
+
+function preparePixelSnapshot(snapshot, exported, outputPath) {
+  return Promise.resolve().then(function () {
+    var bytes = fs.readFileSync(snapshot.path);
+    if (bytes.length !== snapshot.width * snapshot.height * 4) throw new Error("图像像素缓存不完整。");
+    var pixels = document.createElement("canvas");
+    pixels.width = snapshot.width;
+    pixels.height = snapshot.height;
+    var pixelContext = pixels.getContext("2d");
+    var image = pixelContext.createImageData(pixels.width, pixels.height);
+    image.data.set(bytes);
+    pixelContext.putImageData(image, 0, 0);
+    var target = exported.selection || exported.source;
+    var bounds = snapshot.bounds;
+    if (!bounds || ![bounds.left, bounds.top, bounds.width, bounds.height].every(Number.isFinite) || bounds.width <= 0 || bounds.height <= 0) {
+      throw new Error("图像快照边界无效，已停止提交以避免错位。");
+    }
+    var scale = Math.min(1, 2048 / Math.max(target.width, target.height));
+    var canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(target.width * scale));
+    canvas.height = Math.max(1, Math.round(target.height * scale));
+    var drawing = canvas.getContext("2d");
+    drawing.fillStyle = "#ffffff";
+    drawing.fillRect(0, 0, canvas.width, canvas.height);
+    drawing.imageSmoothingQuality = "high";
+    drawing.drawImage(pixels, (bounds.left - target.left) * canvas.width / target.width,
+      (bounds.top - target.top) * canvas.height / target.height,
+      bounds.width * canvas.width / target.width, bounds.height * canvas.height / target.height);
+    return writeCanvasPng(canvas, outputPath);
+  });
 }
 
 function evalHostNow(method, args) {
@@ -564,11 +863,12 @@ function connectPlatform() {
     return Promise.resolve();
   }
 
-  return gatewayClient.fetchModels().then(function (models) {
+  var recoveryClient = gatewayClient;
+  var recovering = resumePendingTasks(recoveryClient);
+  return recoveryClient.fetchModels().then(function (models) {
     populateModels(models, settings.model);
     saveSettings();
     if (!models.length) {
-      gatewayClient = null;
       setConnected(false);
       getElement("connectionState").textContent = "无生图权限";
       setStatus("此 Key 的授权列表中没有生图模型，请在平台检查模型权限。", "error");
@@ -577,14 +877,13 @@ function connectPlatform() {
     setConnected(true);
     getElement("connectionState").textContent = "已连接 · " + models.length + " 个模型";
     setStatus("连接成功，已读取 " + models.length + " 个生图模型。", "success");
-    resumePendingTasks(gatewayClient);
   }).catch(function (error) {
-    gatewayClient = null;
     setConnected(false);
     getElement("connectionState").textContent = "连接失败";
     setStatus("连接失败：" + safeError(error), "error");
   }).then(function () {
     setBusy(false);
+    return recovering;
   });
 }
 
@@ -798,6 +1097,7 @@ function prepareExportedImage(exported) {
   if (!preparation) return Promise.resolve(exported);
   var inputPath = exported.imagePath;
   var outputPath = "";
+  var copyExport = preparation.method === "copy";
   return Promise.resolve().then(function () {
     return loadImageElement(inputPath);
   }).then(function (image) {
@@ -806,6 +1106,7 @@ function prepareExportedImage(exported) {
     if (!crop || !canvasBounds || image.width !== canvasBounds.width || image.height !== canvasBounds.height ||
         !(crop.width > 0 && crop.height > 0) || crop.left < 0 || crop.top < 0 ||
         crop.left + crop.width > image.width || crop.top + crop.height > image.height) {
+      if (copyExport) return null;
       throw new Error("导出图片尺寸与原 PSD 不一致，已停止提交以避免选区错位。");
     }
     var scale = Math.min(1, (Number(preparation.maxSize) || 2048) / Math.max(crop.width, crop.height));
@@ -814,6 +1115,10 @@ function prepareExportedImage(exported) {
     canvas.height = Math.max(1, Math.round(crop.height * scale));
     var drawing = canvas.getContext("2d");
     drawing.imageSmoothingQuality = "high";
+    if (copyExport) {
+      drawing.fillStyle = "#ffffff";
+      drawing.fillRect(0, 0, canvas.width, canvas.height);
+    }
     drawing.drawImage(image, crop.left, crop.top, crop.width, crop.height, 0, 0, canvas.width, canvas.height);
     outputPath = inputPath.replace(/\.png$/i, "-prepared.png");
     if (outputPath === inputPath) throw new Error("导出临时文件格式无效。");
@@ -822,6 +1127,17 @@ function prepareExportedImage(exported) {
     exported.imagePath = outputPath;
     delete exported.imagePreparation;
     return exported;
+  }, function (error) {
+    if (copyExport) return null;
+    throw error;
+  }).then(function (prepared) {
+    if (prepared) return prepared;
+    removeFile(inputPath);
+    return evalHost("exportCompatibleImage", [exported.documentId, preparation.fallbackSelection || null]).then(function (result) {
+      exported.imagePath = result.imagePath;
+      delete exported.imagePreparation;
+      return exported;
+    });
   }).catch(function (error) {
     removeFile(inputPath);
     if (outputPath && outputPath !== inputPath) removeFile(outputPath);
@@ -831,7 +1147,7 @@ function prepareExportedImage(exported) {
 
 function prepareSelectionUpload(context, model, parameters) {
   var selection = context.selection || {};
-  var resolved = AIGCSelectionFrame.resolve(parameters, findModelParameter(model, "AspectRatio"), selection.width, selection.height);
+  var resolved = AIGCSelectionFrame.resolve(parameters, findModelParameter(model, "AspectRatio"), selection.width, selection.height, watermarkMargin());
   context.generationFrame = resolved.frame;
   context.generationParameters = resolved.parameters;
   if (!resolved.frame) return Promise.resolve(context.imagePath);
@@ -858,6 +1174,7 @@ function restoreSelectionFrame(inputPath, outputPath, frame) {
   if (!frame) return Promise.resolve(inputPath);
   return loadImageElement(inputPath).then(function (image) {
     var crop = AIGCSelectionFrame.crop(frame, image.width, image.height);
+    if (frame.padded) crop = AIGCSelectionFrame.snapInside(crop);
     var canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(crop.width));
     canvas.height = Math.max(1, Math.round(crop.height));
@@ -888,6 +1205,7 @@ function layerTaskFromRun(run, index, stage, extra) {
     type: "layer",
     traceId: run.traces[index],
     stage: stage,
+    autoResume: true,
     createdAt: run.taskCreatedAt[index] || Date.now(),
     updatedAt: Date.now(),
     index: index,
@@ -897,10 +1215,12 @@ function layerTaskFromRun(run, index, stage, extra) {
     exportInfo: {
       documentId: run.exportInfo.documentId,
       documentName: run.exportInfo.documentName,
-      source: run.exportInfo.source
+      source: run.exportInfo.source,
+      artboard: run.exportInfo.artboard
     },
     workDirectory: run.workDirectory,
     cleanupText: run.cleanupText,
+    slot: run.slots && run.slots[index],
     target: run.targets && run.targets[index] || run.exportInfo.source,
     sourceFrame: !(run.targets && run.targets[index]) ? run.sourceFrame : null,
     downloadedPath: run.downloadedPaths[index] || "",
@@ -919,12 +1239,14 @@ function layerTaskFromRun(run, index, stage, extra) {
 }
 
 function processSelectionPendingTask(task, client, report) {
+  reconcileTaskCache(task);
   var context = task.context || {};
   var resultPath = task.result && task.result.path || task.resultPath;
   var downloadedPath = task.downloadedPath || "";
   var cleanupWarning = task.cleanupWarning || "";
   var croppedPath = task.croppedPath || "";
   var cleanupPath = task.cleanupPath || "";
+  var transparentRequested = String(context.generationParameters && context.generationParameters.Background || "").toLowerCase() === "transparent";
   upsertPendingTask(task);
 
   function persist(stage) {
@@ -965,18 +1287,17 @@ function processSelectionPendingTask(task, client, report) {
     if (task.result && task.result.path) return;
     resultPath = task.resultPath || downloadedPath;
     if (task.stage !== "restored") return;
-    if (!task.cleanupText) {
+    if (!transparentRequested) {
       task.result = { path: resultPath, healRegions: [] };
       persist("prepared");
       return;
     }
-    report("正在清理角落字符…", "working");
+    report("正在处理透明背景…", "working");
     cleanupPath = task.cleanupPath || path.join(os.tmpdir(), "aigc-result-clean-resume-" + Date.now() + ".png");
     task.cleanupPath = cleanupPath;
-    return cutoutLayer(resultPath, cleanupPath, { cleanup: true }).catch(function (error) {
-      return { path: resultPath, healRegions: [], warning: "字符清理已跳过：" + safeError(error) };
+    return cutoutLayer(resultPath, cleanupPath, { cleanup: false, key: transparentRequested }).catch(function (error) {
+      return { path: resultPath, healRegions: [], warning: "本地处理已跳过，保留平台原图：" + safeError(error) };
     }).then(function (result) {
-      if (result.path !== resultPath) removeFile(resultPath);
       task.result = result;
       task.cleanupWarning = result.warning || "";
       cleanupWarning = task.cleanupWarning;
@@ -987,22 +1308,101 @@ function processSelectionPendingTask(task, client, report) {
     if (!result || !result.path) throw new Error("待恢复任务缺少可回填的结果文件。");
     report("正在放回原选区…", "working");
     persist("placing");
-    return evalHost("placeResult", [result.path, context.selection, context.selectionChannelName, context.documentId, result.healRegions || [],
-      context.source, context.artboard, task.id]).then(function (placed) {
+    var fittedPath = "";
+    var fittedResult;
+    var placeStartedAt = Date.now();
+    return fitResultToSelection(result, context.selection).then(function (fitted) {
+      fittedResult = fitted;
+      if (fitted.path !== result.path) fittedPath = fitted.path;
+      return evalHost("placeResult", [fitted.path, context.selection, context.selectionChannelName, context.documentId, fitted.healRegions || [],
+        context.source, context.artboard, task.id, context.selectionMaskPath, context.slot]);
+    }).then(function (placed) {
+      if (!placed || placed.placed !== true) throw new Error("后台助手未确认选区写入，任务和结果已保留。");
       var warnings = (placed && placed.warnings) || [];
       if (cleanupWarning) warnings.unshift(cleanupWarning);
-      removeFile(task.resultPath);
-      removeFile(task.downloadedPath);
-      removeFile(task.croppedPath);
-      removeFile(task.cleanupPath);
       removePendingTask(task.id);
-      report("完成，结果已放回原选区的新图层。" + (warnings.length ? "\n" + warnings.join("\n") : ""), warnings.length ? "" : "success");
-      return placed;
+      report("结果已放回原选区。", "success");
+      return cleanupAfterReturn(task.cleanupText, fittedResult, context, task.id, placed, 'cover').then(function (cleanupWarnings) {
+        warnings = warnings.concat(cleanupWarnings);
+        removeFile(fittedPath);
+        removeFile(result.path);
+        removeFile(task.resultPath);
+        removeFile(task.downloadedPath);
+        removeFile(task.croppedPath);
+        removeFile(task.cleanupPath);
+        removeFile(context.selectionMaskPath);
+        var timing = (placed && placed.timing) || {};
+        var timingInfo = "";
+        if (timing.totalMs > 0) {
+          timingInfo = "\n耗时 " + (Date.now() - placeStartedAt) + "ms（PS 内 " + timing.totalMs + "ms";
+          timingInfo += "：切换 " + (timing.activateMs || 0) + "，置入 " + Math.max(0, (timing.placeMs || 0) - (timing.healMs || 0));
+          timingInfo += "，修复 " + (timing.healMs || 0) + "，切回 " + (timing.restoreMs || 0) + "）";
+        }
+        report("完成，结果已放回原选区的新图层。" + timingInfo + (warnings.length ? "\n" + warnings.join("\n") : ""), warnings.length ? "" : "success");
+        return placed;
+      });
+    }, function (error) {
+      removeFile(fittedPath);
+      throw error;
     });
   });
 }
 
+function cleanupAfterReturn(enabled, result, context, taskId, receipt, mode) {
+  return Promise.resolve([]);
+  if (!receipt || !receipt.cleanupToken) return Promise.resolve(["图片已贴回；未取得安全清理凭据，已跳过角落处理。"]);
+  var outputPath = result.path.replace(/\.png$/i, "") + "-post-clean.png";
+  return Promise.resolve().then(function () {
+    return cutoutLayer(result.path, outputPath, { cleanup: true, key: false });
+  }).then(function (cleaned) {
+    if (cleaned.changed === false) return cleaned.warning ? [cleaned.warning] : [];
+    return getBackgroundReturn().cleanup(context, cleaned, taskId, receipt, mode).then(function (outcome) {
+      var warnings = outcome && outcome.warnings || [];
+      if (cleaned.warning) warnings.unshift(cleaned.warning);
+      return warnings;
+    });
+  }).catch(function (error) {
+    return ["图片已贴回；角落字符清理失败，保留已贴回内容：" + safeError(error)];
+  }).then(function (warnings) {
+    removeFile(outputPath);
+    return warnings;
+  });
+}
+
+function fitResultToSelection(result, selection) {
+  var width = Math.round(Number(selection && selection.width));
+  var height = Math.round(Number(selection && selection.height));
+  if (!(width > 0 && height > 0)) return Promise.resolve(result);
+  return loadImageElement(result.path).then(function (image) {
+    if (image.width === width && image.height === height) return result;
+    var scale = Math.max(width / image.width, height / image.height);
+    var drawWidth = image.width * scale;
+    var drawHeight = image.height * scale;
+    var offsetLeft = (width - drawWidth) / 2;
+    var offsetTop = (height - drawHeight) / 2;
+    var canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    var drawing = canvas.getContext("2d");
+    drawing.imageSmoothingQuality = "high";
+    drawing.drawImage(image, offsetLeft, offsetTop, drawWidth, drawHeight);
+    var outputPath = result.path.replace(/\.png$/i, "") + "-fit.png";
+    var regions = (result.healRegions || []).map(function (region) {
+      return {
+        left: Math.max(0, (offsetLeft + region.left * drawWidth) / width),
+        top: Math.max(0, (offsetTop + region.top * drawHeight) / height),
+        right: Math.min(1, (offsetLeft + region.right * drawWidth) / width),
+        bottom: Math.min(1, (offsetTop + region.bottom * drawHeight) / height)
+      };
+    }).filter(function (region) { return region.right > region.left && region.bottom > region.top; });
+    return { path: writeCanvasPng(canvas, outputPath), healRegions: regions };
+  }).catch(function () {
+    return result;
+  });
+}
+
 function processLayerPendingTask(task, client, report) {
+  reconcileTaskCache(task);
   var job = task.job || {};
   var result = task.result || null;
   var downloadedPath = task.downloadedPath || "";
@@ -1049,14 +1449,11 @@ function processLayerPendingTask(task, client, report) {
         width: target.width,
         height: target.height,
         key: job.kind !== "background",
-        cleanup: task.cleanupText,
-        markCorners: true
+        cleanup: false
       }).then(function (prepared) {
-        if (downloadedPath !== prepared.path) removeFile(downloadedPath);
-        if (inputPath !== downloadedPath && inputPath !== prepared.path) removeFile(inputPath);
         return prepared;
       }, function (error) {
-        return { path: inputPath, healRegions: [], unprocessed: true, warning: "本地抠图/字符清理失败，已取回原图：" + safeError(error) };
+        return { path: inputPath, healRegions: [], unprocessed: true, warning: "本地透明处理失败，保留平台图像继续回贴：" + safeError(error) };
       });
     }).then(function (prepared) {
       result = {
@@ -1084,25 +1481,33 @@ function processLayerPendingTask(task, client, report) {
       healRegions: result.healRegions || [],
       target: result.target || task.target,
       unprocessed: result.unprocessed,
-      taskId: task.id
-    }], task.exportInfo.documentId, task.groupName, task.exportInfo.source, layerOrder]).then(function (placed) {
+      taskId: task.id,
+      slot: task.slot
+    }], task.exportInfo.documentId, task.groupName, task.exportInfo.source, layerOrder, task.exportInfo.artboard]).then(function (placed) {
       var placedNames = placed && placed.placed || [];
       if (placedNames.indexOf(result.name) < 0) throw new Error(placed && placed.failures && placed.failures.join("；") || "放入 Photoshop 失败。");
       removePendingTask(task.id);
-      removeFile(result.path);
-      report("已恢复并放回「" + result.name + "」。" + (task.warning ? "\n" + task.warning : ""), task.warning ? "" : "success");
-      return placed;
+      return cleanupAfterReturn(task.cleanupText, result, { documentId: task.exportInfo.documentId,
+        source: task.exportInfo.source, artboard: task.exportInfo.artboard, target: result.target || task.target, slot: task.slot },
+        task.id, placed.receipts && placed.receipts[task.id], 'contain').then(function (warnings) {
+        if (warnings.length) task.warning = (task.warning ? task.warning + "；" : "") + warnings.join("；");
+        removeFile(result.path);
+        removeFile(downloadedPath);
+        report("已恢复并放回「" + result.name + "」。" + (task.warning ? "\n" + task.warning : ""), task.warning ? "" : "success");
+        return placed;
+      });
     });
   });
 }
 
-function resumePendingTasks(client, automatic) {
+function resumePendingTasks(client, automatic, taskIds, localOnly) {
   var tasks = loadPendingTasks().filter(function (task) {
-    return task && task.id && !resumingTasks[task.id] && (!automatic || task.autoResume) && !(layerBusy && task.type === "layer");
+    return task && task.id && (!taskIds || taskIds.indexOf(task.id) >= 0) && !resumingTasks[task.id] && !task.recoveryBlocked && !task.recoveryExhausted &&
+      (!automatic || taskCanAutoResume(task) && (!task.nextRecoveryAt || task.nextRecoveryAt <= Date.now())) && !(layerBusy && task.type === "layer");
   });
   var hasLayerTasks = tasks.some(function (task) { return task && task.type === "layer"; });
   if (!tasks.length || !client || recoveryClosing) {
-    scheduleTaskRecovery(client);
+    scheduleTaskRecovery(localOnly ? gatewayClient : client);
     return Promise.resolve([]);
   }
   if (hasLayerTasks) layerBusy = true;
@@ -1110,12 +1515,19 @@ function resumePendingTasks(client, automatic) {
   return Promise.all(tasks.map(function (task) {
     if (!task || !task.id || resumingTasks[task.id]) return Promise.resolve();
     resumingTasks[task.id] = true;
-    task.autoResume = false;
+    task.autoResume = true;
+    task.lastRecoveryError = null;
+    task.recoveryMessage = "正在重新取回…";
     upsertPendingTask(task);
     if (task.type === "selection") selectionJobs += 1;
     updateControls();
-    var report = task.type === "layer" ? setLayerStatus : function (message, kind) {
-      setStatus("恢复任务：" + message, kind);
+    var report = function (message, kind) {
+      if (loadPendingTasks().some(function (pending) { return pending.id === task.id; })) {
+        task.recoveryMessage = task.lastRecoveryError ? "" : message;
+        upsertPendingTask(task);
+      }
+      if (task.type === "layer") setLayerStatus(message, kind);
+      else setStatus("恢复任务：" + message, kind);
     };
     var promise = Promise.resolve().then(function () {
       return task.type === "layer" ? processLayerPendingTask(task, client, report) : processSelectionPendingTask(task, client, report);
@@ -1136,6 +1548,7 @@ function resumePendingTasks(client, automatic) {
       if (error && error.platformFailed) {
         removePendingTask(task.id);
         if (task.type === "selection" && task.context) {
+          removeFile(task.context.selectionMaskPath);
           return evalHost("discardSelection", [task.context.selectionChannelName, task.context.documentId]).catch(function () {}).then(function () {
             report(safeError(error), "error");
           });
@@ -1153,7 +1566,7 @@ function resumePendingTasks(client, automatic) {
   })).then(function (results) {
     if (hasLayerTasks) layerBusy = false;
     updateControls();
-    scheduleTaskRecovery(client);
+    scheduleTaskRecovery(localOnly ? gatewayClient : client);
     return results;
   });
 }
@@ -1164,7 +1577,7 @@ function runGeneration() {
   var client = gatewayClient;
   var parameters = readParameterValues();
   var model = getSelectedModel();
-  var cleanupText = getElement("cleanupText").checked;
+  var cleanupText = false;
   var cleanupPath = null;
   var croppedPath = null;
   var downloadedResultPath = null;
@@ -1175,6 +1588,7 @@ function runGeneration() {
   var context = null;
   var pendingTask = null;
   var references = referenceImages.slice();
+  var capacity = null;
 
   if (!connected || !client) {
     setStatus("请先连接平台。", "error");
@@ -1193,10 +1607,14 @@ function runGeneration() {
     return;
   }
 
+  try { capacity = reservePendingCapacity(1); }
+  catch (error) { setStatus(safeError(error), "error"); return; }
+
   selectionCounter += 1;
   jobNumber = selectionCounter;
   resultPath = path.join(os.tmpdir(), "aigc-result-" + Date.now() + "-" + jobNumber + ".png");
-  saveSettings();
+  try { saveSettings(); }
+  catch (error) { releasePendingCapacity(capacity); setStatus(safeError(error), "error"); return; }
   selectionJobs += 1;
   updateControls();
 
@@ -1204,8 +1622,8 @@ function runGeneration() {
     setStatus("选区 #" + jobNumber + "：" + message, kind);
   }
 
-  report("正在导出选区…", "working");
-  return evalHost("exportSelection", []).then(function (exported) {
+  report("正在后台读取选区…", "working");
+  return exportCapturedSelection('AIGC 选区 #' + jobNumber + ' 返回结果', require('crypto').randomBytes(16).toString('hex')).then(function (exported) {
     context = exported;
     return prepareExportedImage(exported);
   }).then(function () {
@@ -1230,10 +1648,11 @@ function runGeneration() {
     });
   }).then(function (traceId) {
     pendingTask = {
-      id: selectionTaskId(traceId), type: "selection", traceId: traceId, stage: "waiting", createdAt: Date.now(),
+      id: selectionTaskId(traceId), type: "selection", traceId: traceId, stage: "waiting", autoResume: true, createdAt: Date.now(),
       jobNumber: jobNumber, cleanupText: cleanupText, resultPath: resultPath, context: context
     };
     upsertPendingTask(pendingTask);
+    releasePendingCapacity(capacity);
     resumingTasks[pendingTask.id] = true;
     return processSelectionPendingTask(pendingTask, client, report);
   }).catch(function (error) {
@@ -1245,6 +1664,7 @@ function runGeneration() {
       if (downloadedResultPath !== retainedPath) removeFile(downloadedResultPath);
       if (croppedPath !== retainedPath) removeFile(croppedPath);
       if (context) removeFile(context.imagePath);
+      if (context) removeFile(context.selectionMaskPath);
     }
     if (pendingTask && !error.platformFailed) markTaskForRecovery(pendingTask, error);
     report(taskFailureMessage(error, pendingTask) + (retainedPath ? "\n结果已保留：" + retainedPath : ""), pendingTask && pendingTask.autoResume ? "working" : "error");
@@ -1256,6 +1676,7 @@ function runGeneration() {
     }
   }).then(function () {
     if (pendingTask) delete resumingTasks[pendingTask.id];
+    releasePendingCapacity(capacity);
     selectionJobs -= 1;
     updateControls();
     scheduleTaskRecovery(client);
@@ -1342,14 +1763,14 @@ function cutoutLayer(inputPath, outputPath, options) {
         pixels.data.set(backup);
         warnings.push("自动抠图后几乎为空，已保留原图");
       } else if (!keyed.keyed && keyed.reason !== "transparent") {
-        warnings.push("未识别到透明或纯绿背景，已保留原图以免误删主体");
+        warnings.push("平台返回的 PNG 没有真实透明通道，也没有可安全抠除的纯绿背景；棋盘格可能是图片像素，已保留原图以免误删主体");
       }
     }
     if (regions.length) {
       try {
         cleanup = AIGCResultCleanup.prepareCleanup(pixels.data, canvas.width, canvas.height, regions, { repair: true });
         if (cleanup.skipped) warnings.push("部分角落字符与图像细节无法区分，已保留以免误删");
-        if (cleanup.repairIncomplete) warnings.push("部分字符缺少可采样像素，将尝试 PS 修复");
+        if (cleanup.repairIncomplete) warnings.push("部分字符缺少可采样像素，已保留残余以免误删图像内容");
       } catch (cleanupError) {
         warnings.push("角落字符清理已跳过：" + safeError(cleanupError));
       }
@@ -1370,13 +1791,8 @@ function cutoutLayer(inputPath, outputPath, options) {
       }
       canvas = fitted;
     }
-    if (options.markCorners) {
-      context = canvas.getContext("2d");
-      pixels = context.getImageData(0, 0, canvas.width, canvas.height);
-      AIGCLayerPlan.markCanvasCorners(pixels.data, canvas.width, canvas.height);
-      context.putImageData(pixels, 0, 0);
-    }
-    return { path: writeCanvasPng(canvas, outputPath), warning: warnings.join("；"), healRegions: cleanup.healRegions };
+    return { path: writeCanvasPng(canvas, outputPath), warning: warnings.join("；"), healRegions: cleanup.healRegions,
+      changed: !!(cleanup.deleted || cleanup.repaired) };
   });
 }
 
@@ -1640,6 +2056,7 @@ function processLayerJob(run, index) {
     }).then(function (traceId) {
       run.traces[index] = traceId;
       layerTaskFromRun(run, index, "waiting");
+      releasePendingCapacity(run.capacity, 1);
       reportLayerProgress(run);
       return traceId;
     });
@@ -1664,18 +2081,14 @@ function processLayerJob(run, index) {
     }) : Promise.resolve(downloadedPath);
     return restored.then(function (inputPath) {
       return cutoutLayer(inputPath, path.join(run.workDirectory, "layer-" + index + ".png"), {
-      width: target.width,
-      height: target.height,
-      key: job.kind !== "background",
-      cleanup: run.cleanupText,
-      markCorners: true
+        width: target.width,
+        height: target.height,
+        key: job.kind !== "background",
+        cleanup: false
       }).then(function (result) {
-        removeFile(downloadedPath);
-        if (inputPath !== downloadedPath) removeFile(inputPath);
         return result;
       }, function (error) {
-        if (inputPath !== downloadedPath) removeFile(downloadedPath);
-        return { path: inputPath, healRegions: [], unprocessed: true, warning: "本地抠图/字符清理失败，已取回原图：" + safeError(error) };
+        return { path: inputPath, healRegions: [], unprocessed: true, warning: "本地透明处理失败，保留平台图像继续回贴：" + safeError(error) };
       });
     });
   }).then(function (result) {
@@ -1709,32 +2122,52 @@ function placeLayerRun(run) {
     if (result && !run.placed[index] && !run.placeAttempted[index]) {
       run.placeAttempted[index] = true;
       batch.push({ path: result.path, name: result.name, belowName: lowerPlaced, index: index, healRegions: result.healRegions,
-        target: result.target, unprocessed: result.unprocessed, taskId: run.taskIds[index] });
+        target: result.target, unprocessed: result.unprocessed, taskId: run.taskIds[index], slot: run.slots && run.slots[index] });
     }
     if (result) lowerPlaced = job.name;
   });
   if (!batch.length) return Promise.resolve([]);
+  batch.forEach(function (item) {
+    var savedTask = loadPendingTasks().filter(function (task) { return task.id === item.taskId; })[0];
+    if (!savedTask) return;
+    savedTask.stage = "placing";
+    savedTask.autoResume = true;
+    savedTask.updatedAt = Date.now();
+    upsertPendingTask(savedTask);
+  });
   setLayerStatus("正在把「" + batch.map(function (item) { return item.name; }).join("、") + "」放回「" + (run.exportInfo.documentName || "原 PSD") + "」…", "working");
   var layerOrder = run.jobs.map(function (job) { return job.name; });
-  return evalHost("placeLayeredResult", [batch, run.exportInfo.documentId, run.groupName, run.exportInfo.source, layerOrder]).then(function (placed) {
-    if (placed && placed.warnings) run.warnings = run.warnings.concat(placed.warnings);
-    var placedNames = (placed && placed.placed) || [];
-    batch.forEach(function (item) {
-      if (placedNames.indexOf(item.name) >= 0) {
-        run.placed[item.index] = true;
-        removePendingTask(run.taskIds[item.index]);
-        removeFile(item.path);
-      } else {
-        run.failures[item.index] = item.name + "：放入 Photoshop 失败";
-      }
+  var failures = [];
+  var chain = Promise.resolve();
+  batch.forEach(function (item) {
+    chain = chain.then(function () {
+      return evalHost("placeLayeredResult", [[item], run.exportInfo.documentId, run.groupName, run.exportInfo.source, layerOrder, run.exportInfo.artboard]).then(function (placed) {
+        if (placed && placed.warnings) run.warnings = run.warnings.concat(placed.warnings);
+        var placedNames = (placed && placed.placed) || [];
+        if (placedNames.indexOf(item.name) >= 0) {
+          run.placed[item.index] = true;
+          removePendingTask(run.taskIds[item.index]);
+          return cleanupAfterReturn(run.cleanupText, item, { documentId: run.exportInfo.documentId,
+            source: run.exportInfo.source, artboard: run.exportInfo.artboard, target: item.target || run.exportInfo.source, slot: item.slot },
+            item.taskId, placed.receipts && placed.receipts[item.taskId], 'contain').then(function (warnings) {
+            run.warnings = run.warnings.concat(warnings);
+            removeFile(item.path);
+            removeFile(run.downloadedPaths && run.downloadedPaths[item.index]);
+          });
+        } else {
+          run.failures[item.index] = item.name + "：放入 Photoshop 失败";
+          var savedTask = loadPendingTasks().filter(function (task) { return task.id === item.taskId; })[0];
+          if (savedTask) markTaskForRecovery(savedTask, new Error(((placed && placed.failures) || []).join("\n") || run.failures[item.index]));
+        }
+        failures = failures.concat((placed && placed.failures) || []);
+      }, function (error) {
+        run.failures[item.index] = item.name + "：" + safeError(error);
+        var savedTask = loadPendingTasks().filter(function (task) { return task.id === item.taskId; })[0];
+        if (savedTask) markTaskForRecovery(savedTask, error);
+      });
     });
-    return (placed && placed.failures) || [];
-  }, function (error) {
-    batch.forEach(function (item) {
-      run.failures[item.index] = item.name + "：" + safeError(error);
-    });
-    return [];
   });
+  return chain.then(function () { return failures; });
 }
 
 function queueLayerPlacement(run) {
@@ -1792,6 +2225,7 @@ function executeLayerRun(run) {
     setLayerStatus(safeError(error), "error");
   }).then(function () {
     layerBusy = false;
+    releasePendingCapacity(run.capacity);
     updateControls();
     scheduleTaskRecovery(run.client);
   });
@@ -1807,10 +2241,10 @@ function runLayeredPsd() {
     model: model,
     parameters: readParameterValues(),
     userPrompt: userPrompt,
-    cleanupText: getElement("cleanupText").checked,
+    cleanupText: false,
     transparentSupported: findModelOption(model, "Background", "transparent"),
     workDirectory: path.join(os.tmpdir(), "aigc-layered-" + Date.now()),
-    groupName: "AI 分层 " + ("0" + now.getHours()).slice(-2) + ":" + ("0" + now.getMinutes()).slice(-2) + ":" + ("0" + now.getSeconds()).slice(-2),
+    groupName: "AI 分层 " + ("0" + now.getHours()).slice(-2) + ":" + ("0" + now.getMinutes()).slice(-2) + ":" + ("0" + now.getSeconds()).slice(-2) + " · " + now.getTime(),
     jobs: null,
     exportInfo: null,
     imageUrl: "",
@@ -1838,33 +2272,43 @@ function runLayeredPsd() {
   }
   try {
     run.jobs = AIGCLayerPlan.buildLayerJobs(AIGCLayerPlan.parseLayerList(getElement("layerList").value), userPrompt, run.transparentSupported);
+    run.capacity = reservePendingCapacity(run.jobs.length);
   } catch (error) {
     setLayerStatus(safeError(error), "error");
     return;
   }
 
-  if (lastLayerRun) {
-    var protectedPaths = pendingTaskPathMap();
-    if (!isPendingTaskPath(lastLayerRun.workDirectory, protectedPaths)) removeDirectory(lastLayerRun.workDirectory);
-    if (lastLayerRun.exportInfo && !isPendingTaskPath(lastLayerRun.exportInfo.imagePath, protectedPaths)) removeFile(lastLayerRun.exportInfo.imagePath);
+  var snapshot;
+  try {
+    if (lastLayerRun) {
+      var protectedPaths = pendingTaskPathMap();
+      if (!isPendingTaskPath(lastLayerRun.workDirectory, protectedPaths)) removeDirectory(lastLayerRun.workDirectory);
+      if (lastLayerRun.exportInfo && !isPendingTaskPath(lastLayerRun.exportInfo.imagePath, protectedPaths)) removeFile(lastLayerRun.exportInfo.imagePath);
+    }
+    lastLayerRun = null;
+    saveSettings();
+    fs.mkdirSync(run.workDirectory);
+    snapshot = snapshotGuideMasks(guide.docId);
+  } catch (error) {
+    releasePendingCapacity(run.capacity);
+    setLayerStatus(safeError(error), "error");
+    return;
   }
-  lastLayerRun = null;
-  saveSettings();
   layerBusy = true;
   updateControls();
-  setLayerStatus("正在导出整张画面…", "working");
-  fs.mkdirSync(run.workDirectory);
-
-  var snapshot = snapshotGuideMasks(guide.docId);
+  setLayerStatus("正在后台读取原图…", "working");
   var guideSource = snapshot.used ? guide.source : null;
   var guideDocumentId = snapshot.used ? guide.docId : null;
   run.masks = snapshot.masks;
-  evalHost("exportDocument", guideDocumentId ? [guideDocumentId] : []).then(prepareExportedImage).then(function (exported) {
+  exportPixelSubmission({ documentId: guideDocumentId, selection: false, reservation: {
+    names: run.jobs.map(function (job) { return job.name; }), groupName: run.groupName,
+    id: require('crypto').randomBytes(16).toString('hex') } }).then(function (exported) {
     run.exportInfo = exported;
     if (guideSource && (guideSource.width !== exported.source.width || guideSource.height !== exported.source.height)) {
       throw new Error("原 PSD 尺寸已变化，请刷新蒙版预览后重新涂抹。");
     }
     setLayerStatus("正在上传「" + exported.documentName + "」…" + (snapshot.used ? "（使用 " + snapshot.used + " 个涂抹区域）" : ""), "working");
+    run.slots = exported.slots;
     return prepareLayerSource(run).then(function (uploadPath) {
       return run.client.uploadSelection(uploadPath);
     });
@@ -1872,6 +2316,7 @@ function runLayeredPsd() {
     run.imageUrl = imageUrl;
     return executeLayerRun(run);
   }).catch(function (error) {
+    releasePendingCapacity(run.capacity);
     removeDirectory(run.workDirectory);
     if (run.exportInfo) removeFile(run.exportInfo.imagePath);
     layerBusy = false;
@@ -1884,7 +2329,7 @@ function prepareLayerSource(run) {
   var source = run.exportInfo.source;
   var resolved;
   try {
-    resolved = AIGCSelectionFrame.resolve({ AspectRatio: AIGCSelectionFrame.ORIGINAL }, findModelParameter(run.model, "AspectRatio"), source.width, source.height);
+    resolved = AIGCSelectionFrame.resolve({ AspectRatio: AIGCSelectionFrame.ORIGINAL }, findModelParameter(run.model, "AspectRatio"), source.width, source.height, watermarkMargin());
   } catch (error) {
     return Promise.resolve(run.exportInfo.imagePath);
   }
@@ -1896,16 +2341,26 @@ function prepareLayerSource(run) {
 
 function retryLayers() {
   if (!lastLayerRun || layerBusy || !connected) return;
+  var unsubmitted = lastLayerRun.jobs.filter(function (job, index) { return !lastLayerRun.placed[index] && !lastLayerRun.traces[index]; }).length;
+  try { lastLayerRun.capacity = unsubmitted ? reservePendingCapacity(unsubmitted) : null; }
+  catch (error) { setLayerStatus(safeError(error), "error"); return; }
   executeLayerRun(lastLayerRun);
 }
 
 window.addEventListener("load", function () {
+  keepPanelAlive();
   var settings = loadSettings();
+  preparePendingRecovery();
   enableTextInputIme();
+  try { getBackgroundBridge().start().catch(function (error) { setStatus(safeError(error), "error"); }); }
+  catch (error) { setStatus("后台助手未安装，请运行完整实验包中的安装.bat。", "error"); }
   cleanupStaleTempFiles();
   populateLayerTemplates(settings.layerTemplate, settings.layerList);
   getElement("prompt").value = settings.prompt || "";
-  getElement("cleanupText").checked = settings.cleanupText !== false;
+  getElement("watermarkMargin").checked = settings.watermarkMargin !== false;
+  getElement("watermarkMargin").addEventListener("change", function () { saveSettings(); });
+  getElement("watermarkAxis").value = settings.watermarkAxis === "horizontal" ? "horizontal" : "vertical";
+  getElement("watermarkAxis").addEventListener("change", function () { saveSettings(); });
   setConnected(false);
   getElement("connectButton").addEventListener("click", connectPlatform);
   getElement("connectionSettingsButton").addEventListener("click", function () { setConnectionPanelOpen(true); });
@@ -1913,9 +2368,19 @@ window.addEventListener("load", function () {
   getElement("connectionOverlay").addEventListener("click", function (event) {
     if (event.target === this) setConnectionPanelOpen(false);
   });
+  getElement("taskProgressButton").addEventListener("click", function () { setTaskPanelOpen(true); });
+  getElement("closeTaskProgressButton").addEventListener("click", function () { setTaskPanelOpen(false); });
+  getElement("taskProgressOverlay").addEventListener("click", function (event) { if (event.target === this) setTaskPanelOpen(false); });
+  getElement("taskSortButton").addEventListener("click", function () {
+    taskOldestFirst = !taskOldestFirst;
+    this.textContent = taskOldestFirst ? "旧任务在前 ↓" : "新任务在前 ↓";
+    renderTaskProgress();
+  });
+  getElement("clearPausedTasksButton").addEventListener("click", function () { dismissPendingTasks(); });
   document.addEventListener("keydown", function (event) {
     if (isImeComposing(event) || isTextEditingTarget(event.target)) return;
     if (event.key === "Escape" && !getElement("connectionOverlay").hidden) setConnectionPanelOpen(false);
+    if (event.key === "Escape" && !getElement("taskProgressOverlay").hidden) setTaskPanelOpen(false);
   });
   getElement("submitButton").addEventListener("click", runGeneration);
   renderReferenceImages();
@@ -1928,6 +2393,7 @@ window.addEventListener("load", function () {
   });
   getElement("layeredButton").addEventListener("click", runLayeredPsd);
   getElement("retryLayersButton").addEventListener("click", retryLayers);
+  getElement("recoverTasksButton").addEventListener("click", retryPendingTasks);
   getElement("layerTemplate").addEventListener("change", function () {
     getElement("layerList").value = AIGCLayerPlan.findTemplate(getElement("layerTemplate").value).layers.join("\n");
     saveSettings();
@@ -1942,7 +2408,6 @@ window.addEventListener("load", function () {
     saveSettings();
   });
   getElement("prompt").addEventListener("change", saveSettings);
-  getElement("cleanupText").addEventListener("change", saveSettings);
   getElement("guideButton").addEventListener("click", loadGuidePreview);
   getElement("guideLayer").addEventListener("change", refreshGuideLayers);
   getElement("guideBrushTool").addEventListener("click", function () { setGuideTool("brush"); });
@@ -1970,5 +2435,3 @@ window.addEventListener("load", function () {
   });
   initializeConnection(settings);
 });
-
-

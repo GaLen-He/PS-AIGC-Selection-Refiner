@@ -1,7 +1,11 @@
 function CSInterface() {}
 
-CSInterface.prototype.registerKeyEventsInterest = function (interests) {
-  if (window.__adobe_cep__.registerKeyEventsInterest) return window.__adobe_cep__.registerKeyEventsInterest(interests);
+CSInterface.prototype.getExtensionID = function () {
+  return window.__adobe_cep__.getExtensionId();
+};
+
+CSInterface.prototype.dispatchEvent = function (event) {
+  window.__adobe_cep__.dispatchEvent(event);
 };
 
 CSInterface.prototype.evalScript = function (script, callback) {

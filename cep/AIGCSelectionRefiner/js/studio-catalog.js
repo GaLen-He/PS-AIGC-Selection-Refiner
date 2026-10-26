@@ -182,7 +182,7 @@
         continue;
       }
       resolved = parsed.href;
-      if (/\/aigc\/assets\/aigc(?:[.-][\w-]+)?\.js$/.test(parsed.pathname) && parsed.origin === base.origin && !parsed.username && !parsed.password) return resolved;
+      if (/\/aigc\/assets\/aigc(?:[.-][0-9a-f]{6,})?\.js$/i.test(parsed.pathname) && parsed.origin === base.origin && !parsed.username && !parsed.password) return resolved;
     }
     throw new Error("未找到同一平台的生图配置文件，请检查供应商 URL 或更新插件。");
   }

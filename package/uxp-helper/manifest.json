@@ -1,0 +1,10 @@
+{
+  "id": "aigcreturn",
+  "name": "AIGC选区提交/整图分层 · 后台助手",
+  "version": "0.5.30",
+  "main": "index.js",
+  "host": { "app": "PS", "minVersion": "25.0.0", "data": { "apiVersion": 2, "loadEvent": "startup" } },
+  "manifestVersion": 4,
+  "entrypoints": [{ "type": "command", "id": "connect", "label": { "default": "重新连接 AIGC 回贴面板" } }],
+  "runOnStartup": true
+}

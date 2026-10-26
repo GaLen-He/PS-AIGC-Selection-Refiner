@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>AIGC选区提交/整图分层</title>
+    <link rel="stylesheet" href="css/styles.css" />
+    <script src="js/CSInterface.js"></script>
+    <script src="js/studio-catalog.js"></script>
+    <script src="js/api-client.js"></script>
+    <script src="js/layer-plan.js"></script>
+    <script src="js/result-cleanup.js"></script>
+    <script src="js/selection-frame.js"></script>
+    <script src="js/task-progress.js"></script>
+    <script src="js/main.js"></script>
+  </head>
+  <body>
+    <main class="panel">
+      <header>
+        <h1>AIGC选区提交/整图分层</h1>
+        <p>0.5.30</p>
+      </header>
+
+      <button id="taskProgressButton" class="secondary compact" type="button" aria-controls="taskProgressOverlay" aria-expanded="false">任务列表（0/20）</button>
+      <div class="connectionBar">
+        <span id="connectionState" role="status">未连接</span>
+        <button id="connectionSettingsButton" class="secondary compact" type="button" aria-controls="connectionOverlay" aria-expanded="false">连接设置</button>
+      </div>
+      <div id="connectionOverlay" class="connectionOverlay" hidden>
+      <section class="card connectionCard" role="dialog" aria-modal="true" aria-labelledby="connectionTitle">
+        <div class="connectionHeader"><h2 id="connectionTitle">连接设置</h2><button id="closeConnectionButton" class="secondary compact" type="button" aria-label="关闭连接设置">✕</button></div>
+        <label>
+          供应商 URL
+          <input id="platformUrl" type="text" value="https://ai-gateway.kurogames.com" spellcheck="false" />
+        </label>
+        <label>
+          API Key
+          <input id="apiKey" type="password" autocomplete="off" spellcheck="false" />
+        </label>
+        <button id="connectButton" class="primary" type="button">保存并连接</button>
+        <p>仅保存在本机，重开插件自动连接。</p>
+      </section>
+      </div>
+
+      <section id="generationPanel" class="generationPanel" hidden>
+        <label id="modelSelectRow">
+          生图模型
+          <select id="modelSelect"></select>
+        </label>
+        <p id="modelDescription" class="muted"></p>
+        <div id="parametersPanel" class="parameters" hidden></div>
+        <section id="referenceBox" class="referenceBox" tabindex="0" aria-label="选区细化参考图，鼠标移入后按 Ctrl+V 粘贴图片" title="鼠标放在此处，Ctrl+V 粘贴参考图">
+          <div class="referenceHeader">
+            <span>参考图 <span id="referenceCount">（1张）</span></span>
+            <button id="addReferenceButton" class="secondary compact" type="button" title="添加 PNG / JPG / WebP，单张不超过 20 MB；点击提交时才上传">＋ 添加参考图</button>
+            <input id="referenceFileInput" type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" multiple hidden />
+          </div>
+          <div class="selectionReference"><strong>图1 · PS 选区</strong><span>Ctrl+V 添加参考图</span></div>
+          <div id="referenceList" class="referenceList" aria-label="额外参考图" hidden></div>
+          <div id="referenceStatus" class="status" role="status" hidden></div>
+        </section>
+        <label>
+          提示词
+          <textarea id="prompt" rows="5" placeholder="例如：保持图1构图，参考图2材质、图3光影。额外参考图仅用于选区细化。"></textarea>
+        </label>
+        <label class="parameterField checkboxField" title="提交时补约 8% 灰边（全图或贴边选区也可用），贴回前裁掉，角落水印随补边去掉；不勾选则不补边">
+          留边防水印（贴回自动裁掉）
+          <input id="watermarkMargin" type="checkbox" checked />
+        </label>
+        <label class="parameterField">
+          留边方向
+          <select id="watermarkAxis">
+            <option value="vertical">上下留边</option>
+            <option value="horizontal">左右留边</option>
+          </select>
+        </label>
+        <button id="submitButton" class="primary">提交选区并生成</button>
+        <details class="layerBox">
+          <summary>AI 分层（并行重绘）</summary>
+          <label>
+            分层模板
+            <select id="layerTemplate"></select>
+          </label>
+          <label>
+            图层（上→下，每行一个）
+            <textarea id="layerList" rows="3" spellcheck="false"></textarea>
+          </label>
+          <button id="guideButton" class="secondary">涂抹指定图层范围（可选）</button>
+          <div id="guideEditor" class="guideEditor" hidden>
+            <div class="guideTools">
+              <span id="guideSwatch" class="swatch"></span>
+              <select id="guideLayer"></select>
+              <button id="guideBrushTool" class="tool active" title="画笔">画</button>
+              <button id="guideEraseTool" class="tool" title="橡皮">擦</button>
+              <input id="guideBrush" type="range" min="4" max="80" value="24" title="笔刷大小" />
+            </div>
+            <canvas id="guideCanvas" class="guideCanvas"></canvas>
+            <div class="guideTools">
+              <button id="guideClear" class="tool wide">清除当前层</button>
+              <button id="guideClearAll" class="tool wide">全部清除</button>
+            </div>
+          </div>
+          <button id="layeredButton" class="primary layered">整图分层</button>
+          <button id="retryLayersButton" class="secondary" hidden>重新取回失败图层</button>
+          <div id="layerStatus" class="status" hidden></div>
+        </details>
+      </section>
+
+      <button id="recoverTasksButton" class="secondary compact" type="button" hidden title="继续查询或取回已提交的任务，不会重新生图">继续取回</button>
+      <div id="status" class="status">点击「连接设置」配置平台。</div>
+      <div id="taskProgressOverlay" class="taskProgressOverlay" hidden>
+        <section class="taskProgressPanel" role="dialog" aria-modal="true" aria-labelledby="taskProgressSummary">
+          <div class="connectionHeader"><h2 id="taskProgressSummary">任务进度</h2><button id="closeTaskProgressButton" class="secondary compact" type="button" aria-label="关闭任务列表">✕</button></div>
+          <div class="taskToolbar"><button id="taskSortButton" class="secondary compact" type="button">新任务在前 ↓</button><button id="clearPausedTasksButton" class="secondary compact" type="button" disabled>清除失败/暂停任务</button></div>
+          <div id="taskProgressNotice" class="status" role="status" hidden></div>
+          <div id="taskProgressList" class="taskProgressList"></div>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>

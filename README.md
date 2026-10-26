@@ -15,6 +15,8 @@ Photoshop AIGC Selection Refiner 是一个 Photoshop CEP 面板插件，用来�
 
 ## 最近更新
 
+- **0.5.30 更新**：新增【留边防水印（贴回自动裁掉）】和【上下 / 左右留边】选项。提交时可补约 8% 灰边，生成后裁回原选区，减少角落水印进入结果；同时优化单任务重试、任务恢复、透明结果贴回和错误提示。
+- **0.5.16-0.5.29**：加入后台回贴助手、预建结果层、任务进度与恢复、先贴回后清理、签名安装包和更稳的自动升级 / 回退流程。
 - **0.5.15**：优化大图提交与回贴流程。大图导出改用更快的 PNG 副本路径，回贴前由面板预缩放结果，减少 Photoshop 内部重绘和缩放负担。
 - **0.5.14**：针对大画布和画板场景改为后台存储副本导出，减少原 PSD 中合并、裁切、撤销带来的可见闪动。
 - **0.5.11**：增加双文档回贴遮罩，在结果回填、文档切换和刷新期间降低目标文档短暂暴露的概率。
@@ -25,6 +27,7 @@ Photoshop AIGC Selection Refiner 是一个 Photoshop CEP 面板插件，用来�
 
 ```text
 cep/AIGCSelectionRefiner/        当前 CEP 插件主体
+package/                         最新安装包源码、UXP 回贴助手、安装脚本和测试
 cep/AIGCSelectionRefiner/js/     面板逻辑、网关客户端、分层计划和结果清理
 cep/AIGCSelectionRefiner/host/   Photoshop ExtendScript 与本地辅助程序
 src/                             早期 UXP 原型代码

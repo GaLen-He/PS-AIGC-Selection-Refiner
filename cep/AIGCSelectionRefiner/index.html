@@ -2,7 +2,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <title>AIGC 选区细化</title>
+    <title>AIGC选区提交/整图分层</title>
     <link rel="stylesheet" href="css/styles.css" />
     <script src="js/CSInterface.js"></script>
     <script src="js/studio-catalog.js"></script>
@@ -10,16 +10,17 @@
     <script src="js/layer-plan.js"></script>
     <script src="js/result-cleanup.js"></script>
     <script src="js/selection-frame.js"></script>
-    <script src="js/quiet-placement.js"></script>
+    <script src="js/task-progress.js"></script>
     <script src="js/main.js"></script>
   </head>
   <body>
     <main class="panel">
       <header>
-        <h1>AIGC 选区细化 / 分层 PSD</h1>
-        <p>选区细化与分层可同时运行 · 0.5.12</p>
+        <h1>AIGC选区提交/整图分层</h1>
+        <p>0.5.30</p>
       </header>
 
+      <button id="taskProgressButton" class="secondary compact" type="button" aria-controls="taskProgressOverlay" aria-expanded="false">任务列表（0/20）</button>
       <div class="connectionBar">
         <span id="connectionState" role="status">未连接</span>
         <button id="connectionSettingsButton" class="secondary compact" type="button" aria-controls="connectionOverlay" aria-expanded="false">连接设置</button>
@@ -61,9 +62,16 @@
           提示词
           <textarea id="prompt" rows="5" placeholder="例如：保持图1构图，参考图2材质、图3光影。额外参考图仅用于选区细化。"></textarea>
         </label>
-        <label class="checkboxField" title="本地识别角落字符：透明处删除，有图像处先局部修补，再尝试 PS 内容识别修复。可能漏检或误判，可关闭；回填后可撤销。">
-          自动清理角落字符
-          <input id="cleanupText" type="checkbox" checked />
+        <label class="parameterField checkboxField" title="提交时补约 8% 灰边（全图或贴边选区也可用），贴回前裁掉，角落水印随补边去掉；不勾选则不补边">
+          留边防水印（贴回自动裁掉）
+          <input id="watermarkMargin" type="checkbox" checked />
+        </label>
+        <label class="parameterField">
+          留边方向
+          <select id="watermarkAxis">
+            <option value="vertical">上下留边</option>
+            <option value="horizontal">左右留边</option>
+          </select>
         </label>
         <button id="submitButton" class="primary">提交选区并生成</button>
         <details class="layerBox">
@@ -97,9 +105,16 @@
         </details>
       </section>
 
+      <button id="recoverTasksButton" class="secondary compact" type="button" hidden title="继续查询或取回已提交的任务，不会重新生图">继续取回</button>
       <div id="status" class="status">点击「连接设置」配置平台。</div>
+      <div id="taskProgressOverlay" class="taskProgressOverlay" hidden>
+        <section class="taskProgressPanel" role="dialog" aria-modal="true" aria-labelledby="taskProgressSummary">
+          <div class="connectionHeader"><h2 id="taskProgressSummary">任务进度</h2><button id="closeTaskProgressButton" class="secondary compact" type="button" aria-label="关闭任务列表">✕</button></div>
+          <div class="taskToolbar"><button id="taskSortButton" class="secondary compact" type="button">新任务在前 ↓</button><button id="clearPausedTasksButton" class="secondary compact" type="button" disabled>清除失败/暂停任务</button></div>
+          <div id="taskProgressNotice" class="status" role="status" hidden></div>
+          <div id="taskProgressList" class="taskProgressList"></div>
+        </section>
+      </div>
     </main>
   </body>
 </html>
-
-

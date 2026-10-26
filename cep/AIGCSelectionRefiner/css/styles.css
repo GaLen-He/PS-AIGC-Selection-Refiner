@@ -395,3 +395,21 @@ button.tool.wide {
   border-radius: 6px;
   cursor: crosshair;
 }
+
+.taskProgressOverlay { position: fixed; inset: 0; z-index: 110; display: flex; justify-content: center; align-items: flex-start; padding: 14px; background: rgba(0, 0, 0, .65); box-sizing: border-box; }
+.taskProgressPanel { display: flex; flex-direction: column; width: 100%; max-width: 460px; max-height: 100%; min-height: 0; padding: 12px; box-sizing: border-box; background: #292929; border: 1px solid #494949; border-radius: 6px; box-shadow: 0 8px 28px rgba(0, 0, 0, .45); }
+.taskProgressPanel h2 { margin: 0; font-size: 12px; }
+.taskToolbar { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 2px; }
+.taskProgressList { min-height: 0; overflow-y: auto; margin-top: 8px; }
+.taskDismiss { margin-left: 6px; }
+.taskProgressCard { padding: 9px; margin-bottom: 6px; background: #303030; border: 1px solid #494949; border-radius: 5px; font-size: 12px; }
+.taskProgressCard strong { display: block; margin-bottom: 5px; }
+.taskProgressCard > div { color: #bcbcbc; overflow-wrap: anywhere; }
+.taskStepBar { display: flex; gap: 3px; margin: 8px 0; }
+.taskStepBar span { flex: 1; height: 4px; border-radius: 2px; background: #505050; }
+.taskStepBar .done { background: #80b8ef; }
+.taskStepBar .current { background: #1473e6; animation: taskPulse 1.6s ease-in-out infinite; }
+.taskStepBar .stopped { background: #ce9c4e; }
+.taskError { color: #e4af8b; white-space: pre-wrap; overflow-wrap: anywhere; margin: 5px 0 8px; }
+@keyframes taskPulse { 50% { opacity: .4; } }
+@media (prefers-reduced-motion: reduce) { .taskStepBar .current { animation: none; } }

@@ -131,9 +131,14 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
     for (index = 0; index < document.layerSets.length; index += 1) {
       if (isArtboard(document.layerSets[index])) { hasArtboards = true; break; }
     }
+    var insideCanvas = crop.left >= 0 && crop.top >= 0 && crop.left + crop.width <= canvas.width && crop.top + crop.height <= canvas.height;
+    var preparation = {
+      canvas: { width: canvas.width, height: canvas.height },
+      crop: { left: crop.left, top: crop.top, width: crop.width, height: crop.height },
+      maxSize: 2048
+    };
     if (!hasArtboards && document.mode === DocumentMode.RGB && document.bitsPerChannel === BitsPerChannelType.EIGHT &&
-        canvas.width <= 8192 && canvas.height <= 8192 && canvas.width * canvas.height <= 16777216 &&
-        crop.left >= 0 && crop.top >= 0 && crop.left + crop.width <= canvas.width && crop.top + crop.height <= canvas.height) {
+        canvas.width <= 8192 && canvas.height <= 8192 && canvas.width * canvas.height <= 16777216 && insideCanvas) {
       try {
         var options = new ExportOptionsSaveForWeb();
         options.format = SaveDocumentType.PNG;
@@ -142,13 +147,36 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
         options.interlaced = false;
         options.includeProfile = true;
         document.exportDocument(file, ExportType.SAVEFORWEB, options);
-        return {
-          canvas: { width: canvas.width, height: canvas.height },
-          crop: { left: crop.left, top: crop.top, width: crop.width, height: crop.height },
-          maxSize: 2048
-        };
+        return preparation;
       } catch (exportError) {}
     }
+    if (insideCanvas && document.mode === DocumentMode.RGB && document.bitsPerChannel !== BitsPerChannelType.THIRTYTWO &&
+        canvas.width <= 16384 && canvas.height <= 16384 && canvas.width * canvas.height <= 100000000) {
+      try {
+        saveCopyPng(document, file);
+        preparation.method = "copy";
+        preparation.fallbackSelection = selection || null;
+        return preparation;
+      } catch (copyError) {
+        try { if (file.exists) file.remove(); } catch (removeError) {}
+      }
+    }
+    compatibleExport(document, selection, file);
+    return null;
+  }
+
+  function saveCopyPng(document, file) {
+    var options = new PNGSaveOptions();
+    options.interlaced = false;
+    try { options.compression = 1; } catch (compressionError) {}
+    document.saveAs(file, options, true, Extension.LOWERCASE);
+    if (file.exists) return;
+    var copied = new File(file.fsName.replace(/\.png$/i, " copy.png"));
+    if (copied.exists && copied.rename(file.name) && file.exists) return;
+    throw new Error("PNG copy was not written");
+  }
+
+  function compatibleExport(document, selection, file) {
     var previousUnits = app.preferences.rulerUnits;
     var savedState = document.activeHistoryState;
     var job = { selection: selection, file: file };
@@ -164,8 +192,27 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
       app.preferences.rulerUnits = previousUnits;
     }
     if (job.error) throw job.error;
-    return null;
   }
+
+  AIGCSelectionRefiner.exportCompatibleImage = function (documentId, selection) {
+    var previousDialogMode = app.displayDialogs;
+    var previousDocument = null;
+    var tempFile = null;
+    try {
+      previousDocument = activateDocument(documentId);
+      app.displayDialogs = DialogModes.NO;
+      useAcceleratedPlayback();
+      tempFile = new File(Folder.temp.fsName + "/aigc-selection-" + new Date().getTime() + "-compatible.png");
+      compatibleExport(app.activeDocument, selection || null, tempFile);
+      return ok({ imagePath: tempFile.fsName });
+    } catch (error) {
+      try { if (tempFile && tempFile.exists) tempFile.remove(); } catch (fileError) {}
+      return fail(error);
+    } finally {
+      try { app.displayDialogs = previousDialogMode; } catch (dialogError) {}
+      restoreDocument(previousDocument);
+    }
+  };
 
   function duplicateMergedDocument(name) {
     var sourceDocument = app.activeDocument;
@@ -333,8 +380,21 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
   }
 
   function restoreDocument(previous) {
+    if (!previous) return;
+    var identity = 0;
+    try { identity = Number(previous.id); } catch (idError) {}
+    if (identity > 0) {
+      try {
+        var reference = new ActionReference();
+        reference.putIdentifier(cTID("Dcmn"), identity);
+        var descriptor = new ActionDescriptor();
+        descriptor.putReference(cTID("null"), reference);
+        executeAction(cTID("slct"), descriptor, DialogModes.NO);
+        return;
+      } catch (selectError) {}
+    }
     try {
-      if (previous) app.activeDocument = previous;
+      app.activeDocument = previous;
     } catch (restoreError) {}
   }
 
@@ -429,11 +489,147 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
 
   var selectionSnapshotCounter = 0;
 
-  AIGCSelectionRefiner.exportSelection = function () {
+  function selectionHistoryStamp(document) {
+    return String(document.historyStates.length) + ":" + String(document.activeHistoryState.name);
+  }
+
+  var pendingReservation = null;
+
+  function selectedLayerIdentities(document) {
+    var reference = new ActionReference();
+    reference.putProperty(cTID("Prpr"), sTID("targetLayersIDs"));
+    reference.putEnumerated(cTID("Dcmn"), cTID("Ordn"), cTID("Trgt"));
+    var descriptor = executeActionGet(reference);
+    var identities = [];
+    if (descriptor.hasKey(sTID("targetLayersIDs"))) {
+      var selected = descriptor.getList(sTID("targetLayersIDs"));
+      for (var index = 0; index < selected.count; index += 1) identities.push(selected.getReference(index).getIdentifier());
+    } else {
+      var identity = layerIdentity(document.activeLayer);
+      if (identity) identities.push(identity);
+    }
+    return identities;
+  }
+
+  function restoreSelectedLayers(identities) {
+    if (!identities.length) {
+      if (!selectedLayerIdentities(app.activeDocument).length) return;
+      executeAction(sTID("selectNoLayers"), new ActionDescriptor(), DialogModes.NO);
+      return;
+    }
+    for (var index = 0; index < identities.length; index += 1) {
+      var reference = new ActionReference();
+      reference.putIdentifier(sTID("layer"), identities[index]);
+      var descriptor = new ActionDescriptor();
+      descriptor.putReference(cTID("null"), reference);
+      descriptor.putBoolean(sTID("makeVisible"), false);
+      if (index) descriptor.putEnumerated(sTID("selectionModifier"), sTID("selectionModifierType"), sTID("addToSelection"));
+      executeAction(cTID("slct"), descriptor, DialogModes.NO);
+    }
+  }
+
+  AIGCSelectionRefiner._reserveInternal = function () {
+    var job = pendingReservation;
+    try {
+      var parent = job.parent;
+      var group = null;
+      if (job.reservation.groupName) {
+        group = parent.layerSets.add();
+        group.name = job.reservation.groupName;
+        parent = group;
+      }
+      var names = job.reservation.names || [job.reservation.name];
+      var slots = [];
+      for (var index = names.length - 1; index >= 0; index -= 1) {
+        var layer = parent.artLayers.add();
+        layer.name = names[index];
+        job.document.activeLayer = layer;
+        if (!job.reservation.names) makeRevealSelectionMask();
+        var identity = layerIdentity(layer);
+        if (!(identity > 0)) throw new Error("无法保存目标图层标识，未提交生图。");
+        slots.unshift({ layerId: identity, parentId: group ? layerIdentity(group) : job.parentId,
+          groupId: group ? layerIdentity(group) : null, name: layer.name,
+          reservationId: job.reservation.id, maskPrepared: !job.reservation.names });
+      }
+      job.document.activeChannels = job.channels;
+      restoreSelectedLayers(job.selected);
+      job.slot = job.reservation.names ? { slots: slots } : slots[0];
+    } catch (error) { job.error = error; }
+  };
+
+  function reserveNativeSelection(document, artboard, reservation) {
+    if (!reservation || !/^[a-f0-9]{32}$/.test(reservation.id) ||
+      (!reservation.names && (typeof reservation.name !== "string" || !reservation.name.length))) {
+      throw new Error("目标图层名称或任务标识无效，未提交生图。");
+    }
+    if (reservation.names) {
+      if (Object.prototype.toString.call(reservation.names) !== "[object Array]" || !reservation.names.length ||
+        reservation.names.length > 32 || typeof reservation.groupName !== "string" || !reservation.groupName.length) {
+        throw new Error("分层目标组无效，未提交生图。");
+      }
+      for (var index = 0; index < reservation.names.length; index += 1) {
+        if (typeof reservation.names[index] !== "string" || !reservation.names[index].length) throw new Error("分层名称无效。");
+        for (var previous = 0; previous < index; previous += 1) {
+          if (reservation.names[index] === reservation.names[previous]) throw new Error("分层名称重复。");
+        }
+      }
+    }
+    var parent = artboard ? findArtboard(document, artboard) : document;
+    if (!parent || (artboard && layerIdentity(parent) !== artboard.id)) throw new Error("提交任务的原画板不存在。");
+    var selected = selectedLayerIdentities(document);
+    var channels = document.activeChannels;
+    var savedState = document.activeHistoryState;
+    var job = { document: document, parent: parent, parentId: artboard ? artboard.id : activeDocumentId(),
+      reservation: reservation, selected: selected, channels: channels };
+    try {
+      pendingReservation = job;
+      document.suspendHistory("AIGC 预建结果图层", "AIGCSelectionRefiner._reserveInternal()");
+      if (job.error) throw job.error;
+      if (!job.slot) throw new Error("目标图层或原选区蒙版未创建。");
+      return job.slot;
+    } catch (error) {
+      document.activeHistoryState = savedState;
+      document.activeChannels = channels;
+      restoreSelectedLayers(selected);
+      throw error;
+    } finally { pendingReservation = null; }
+  }
+
+  AIGCSelectionRefiner.prepareSubmission = function (options) {
+    var previousDialogMode = app.displayDialogs;
+    var startedAt = new Date().getTime();
+    try {
+      if (!app.documents.length) throw new Error("请先打开一个 Photoshop 文档。");
+      options = options || {};
+      var document = app.activeDocument;
+      var documentId = activeDocumentId();
+      if (options.documentId && options.documentId !== documentId) throw new Error("请在绘制蒙版的原文档中点击提交；不会切换操作窗口。");
+      var selection = options.selection ? getSelectionBounds() : null;
+      var source = documentBounds(document);
+      var artboard = selection ? captureActiveArtboard(document) : null;
+      app.displayDialogs = DialogModes.NO;
+      var reserved = options.reservation ? reserveNativeSelection(document, artboard, options.reservation) : null;
+      return ok({ documentId: documentId, documentName: document.name, source: source, selection: selection,
+        artboard: artboard, selectionChannelName: "", historyStamp: selectionHistoryStamp(document),
+        slot: reserved && !options.reservation.names ? reserved : null,
+        slots: reserved && options.reservation.names ? reserved.slots : null,
+        timing: { hostMs: new Date().getTime() - startedAt } });
+    } catch (error) { return fail(error); }
+    finally { app.displayDialogs = previousDialogMode; }
+  };
+
+  AIGCSelectionRefiner.selectionContext = function () {
+    try {
+      if (!app.documents.length) throw new Error("请先打开一个 Photoshop 文档。");
+      var document = app.activeDocument;
+      return ok({ documentId: activeDocumentId(), documentName: document.name, source: documentBounds(document),
+        selection: getSelectionBounds(), artboard: captureActiveArtboard(document), historyStamp: selectionHistoryStamp(document) });
+    } catch (error) { return fail(error); }
+  };
+
+  AIGCSelectionRefiner.exportSelection = function (expectedContext) {
     var previousDialogMode = app.displayDialogs;
     var sourceDocument = null;
-    var selectionChannelName = "";
-    var sourceChannels = null;
     var tempFile = null;
     try {
       if (!app.documents.length) {
@@ -445,32 +641,36 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
       sourceDocument = app.activeDocument;
       var documentId = activeDocumentId();
       var selection = getSelectionBounds();
+      if (expectedContext && expectedContext.reservation && !expectedContext.documentId) {
+        expectedContext = { documentId: documentId, source: documentBounds(sourceDocument), selection: selection,
+          historyStamp: selectionHistoryStamp(sourceDocument), reservation: expectedContext.reservation,
+          backgroundSessionId: expectedContext.backgroundSessionId };
+      }
+      if (!expectedContext || expectedContext.documentId !== documentId || expectedContext.historyStamp !== selectionHistoryStamp(sourceDocument) ||
+          expectedContext.source.width !== Math.round(px(sourceDocument.width)) || expectedContext.source.height !== Math.round(px(sourceDocument.height)) ||
+          expectedContext.selection.left !== selection.left || expectedContext.selection.top !== selection.top ||
+          expectedContext.selection.width !== selection.width || expectedContext.selection.height !== selection.height) {
+        throw new Error("提交前文档或选区已改变，请在目标选区重新点击提交。");
+      }
       var artboard = captureActiveArtboard(sourceDocument);
-      sourceChannels = sourceDocument.activeChannels;
       selectionSnapshotCounter += 1;
-      selectionChannelName = "AIGC_selection_" + new Date().getTime() + "_" + selectionSnapshotCounter;
-      var snapshot = sourceDocument.channels.add();
-      snapshot.name = selectionChannelName;
-      sourceDocument.selection.store(snapshot);
-      sourceDocument.activeChannels = sourceChannels;
       tempFile = new File(Folder.temp.fsName + "/aigc-selection-" + new Date().getTime() + "-" + selectionSnapshotCounter + ".png");
       var imagePreparation = exportCroppedInPlace(sourceDocument, selection, tempFile);
+      var slot = expectedContext.reservation ? reserveNativeSelection(sourceDocument, artboard, expectedContext.reservation) : null;
       app.displayDialogs = previousDialogMode;
 
       return ok({
         imagePath: tempFile.fsName,
         imagePreparation: imagePreparation,
         selection: selection,
-        selectionChannelName: selectionChannelName,
+        selectionChannelName: "",
         documentId: documentId,
         documentName: sourceDocument.name,
         source: documentBounds(sourceDocument),
-        artboard: artboard
+        artboard: artboard,
+        slot: slot
       });
     } catch (error) {
-      if (sourceDocument && selectionChannelName) {
-        try { sourceDocument.channels.getByName(selectionChannelName).remove(); } catch (removeError) {}
-      }
       if (tempFile) {
         try { if (tempFile.exists) tempFile.remove(); } catch (fileError) {}
       }
@@ -478,10 +678,6 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
         app.displayDialogs = previousDialogMode;
       } catch (dialogError) {}
       return fail(error);
-    } finally {
-      if (sourceDocument && sourceChannels) {
-        try { sourceDocument.activeChannels = sourceChannels; } catch (channelError) {}
-      }
     }
   };
 
@@ -555,7 +751,16 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
 
   function healResultRegions(layer, regions, target) {
     var warnings = [];
+    lastHealMs = 0;
     if (!regions || !regions.length) return warnings;
+    var healStart = new Date().getTime();
+    try { return healResultRegionsNow(layer, regions, target, warnings); }
+    finally { lastHealMs = new Date().getTime() - healStart; }
+  }
+
+  var lastHealMs = 0;
+
+  function healResultRegionsNow(layer, regions, target, warnings) {
     var document = app.activeDocument;
     var savedChannel = null;
     var savedChannels = document.activeChannels;
@@ -674,6 +879,7 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
       fitted.top = job.selection.top + (job.selection.height - fitted.height) / 2;
       resizeAndMoveLayer(layer, fitted);
       var warnings = healResultRegions(layer, job.healRegions, fitted);
+      job.healMs = lastHealMs;
       if (Math.abs(fitted.width - job.selection.width) > 1 || Math.abs(fitted.height - job.selection.height) > 1) {
         warnings.push("返回比例不同，已等比覆盖并由原选区蒙版裁切，未拉伸。");
       }
@@ -707,8 +913,12 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
   AIGCSelectionRefiner.placeResult = function (resultPath, selection, selectionChannelName, documentId, healRegions, source, artboard, taskId) {
     var previousDialogMode = app.displayDialogs;
     var previousDocument = null;
+    var startedAt = new Date().getTime();
+    var timing = { switched: false };
     try {
       previousDocument = activateDocument(documentId);
+      timing.switched = !!previousDocument;
+      timing.activateMs = new Date().getTime() - startedAt;
       if (taskId && findNamedLayer(app.activeDocument, selectionResultName(taskId))) {
         restoreDocument(previousDocument);
         return ok({ placed: true, alreadyPlaced: true, warnings: [] });
@@ -724,15 +934,23 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
         artboard: artboard || null,
         taskId: taskId || ""
       };
+      var placeStart = new Date().getTime();
       withPixelUnits(function () {
         app.activeDocument.suspendHistory("AIGC 回填", "AIGCSelectionRefiner._placeInternal()");
       });
+      timing.placeMs = new Date().getTime() - placeStart;
       var job = pendingPlacement;
       pendingPlacement = null;
       app.displayDialogs = previousDialogMode;
       if (job.error) throw job.error;
+      timing.healMs = job.healMs || 0;
+      var restoreStart = new Date().getTime();
       restoreDocument(previousDocument);
-      return ok(job.result || { placed: true });
+      timing.restoreMs = new Date().getTime() - restoreStart;
+      timing.totalMs = new Date().getTime() - startedAt;
+      var placedResult = job.result || { placed: true, warnings: [] };
+      placedResult.timing = timing;
+      return ok(placedResult);
     } catch (error) {
       pendingPlacement = null;
       try {
@@ -741,6 +959,28 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
       restoreDocument(previousDocument);
       return fail(error);
     }
+  };
+
+  AIGCSelectionRefiner.documentState = function (documentId) {
+    var identity = Number(documentId);
+    var state = { active: false, exists: false };
+    try {
+      if (!app.documents.length) return ok(state);
+      state.active = activeDocumentId() === identity;
+      if (state.active) {
+        state.exists = true;
+        return ok(state);
+      }
+      for (var index = 0; index < app.documents.length; index += 1) {
+        if (Number(app.documents[index].id) === identity) {
+          state.exists = true;
+          break;
+        }
+      }
+    } catch (error) {
+      state.exists = true;
+    }
+    return ok(state);
   };
 
   AIGCSelectionRefiner.openDocument = function (documentPath) {
@@ -875,12 +1115,11 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
     }
   };
   AIGCSelectionRefiner.discardSelection = function (selectionChannelName, documentId) {
-    var previousDocument = null;
     try {
       if (!app.documents.length || !selectionChannelName) {
         return ok({ removed: false });
       }
-      previousDocument = activateDocument(documentId);
+      if (activeDocumentId() !== Number(documentId)) return ok({ removed: false });
       try {
         app.activeDocument.channels.getByName(selectionChannelName).remove();
         return ok({ removed: true });
@@ -889,8 +1128,6 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
       }
     } catch (error) {
       return fail(error);
-    } finally {
-      restoreDocument(previousDocument);
     }
   };
 }());
