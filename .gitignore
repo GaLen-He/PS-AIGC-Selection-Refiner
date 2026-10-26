@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build and release outputs
+outputs/
+backup/
+*.zxp
+*.zip
+*.7z
+*.rar
+
+# Local secrets and signing material
+.env
+.env.*
+.rnd
+model-response.json
+tools/adobe-signing/
+!tools/adobe-signing/README.md
+tools/adobe-signing/private/
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Local planning notes
+docs/superpowers/

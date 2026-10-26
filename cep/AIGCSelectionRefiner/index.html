@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>AIGC 选区细化</title>
+    <link rel="stylesheet" href="css/styles.css" />
+    <script src="js/CSInterface.js"></script>
+    <script src="js/studio-catalog.js"></script>
+    <script src="js/api-client.js"></script>
+    <script src="js/layer-plan.js"></script>
+    <script src="js/result-cleanup.js"></script>
+    <script src="js/selection-frame.js"></script>
+    <script src="js/quiet-placement.js"></script>
+    <script src="js/main.js"></script>
+  </head>
+  <body>
+    <main class="panel">
+      <header>
+        <h1>AIGC 选区细化 / 分层 PSD</h1>
+        <p>选区细化与分层可同时运行 · 0.5.12</p>
+      </header>
+
+      <div class="connectionBar">
+        <span id="connectionState" role="status">未连接</span>
+        <button id="connectionSettingsButton" class="secondary compact" type="button" aria-controls="connectionOverlay" aria-expanded="false">连接设置</button>
+      </div>
+      <div id="connectionOverlay" class="connectionOverlay" hidden>
+      <section class="card connectionCard" role="dialog" aria-modal="true" aria-labelledby="connectionTitle">
+        <div class="connectionHeader"><h2 id="connectionTitle">连接设置</h2><button id="closeConnectionButton" class="secondary compact" type="button" aria-label="关闭连接设置">✕</button></div>
+        <label>
+          供应商 URL
+          <input id="platformUrl" type="text" value="https://ai-gateway.kurogames.com" spellcheck="false" />
+        </label>
+        <label>
+          API Key
+          <input id="apiKey" type="password" autocomplete="off" spellcheck="false" />
+        </label>
+        <button id="connectButton" class="primary" type="button">保存并连接</button>
+        <p>仅保存在本机，重开插件自动连接。</p>
+      </section>
+      </div>
+
+      <section id="generationPanel" class="generationPanel" hidden>
+        <label id="modelSelectRow">
+          生图模型
+          <select id="modelSelect"></select>
+        </label>
+        <p id="modelDescription" class="muted"></p>
+        <div id="parametersPanel" class="parameters" hidden></div>
+        <section id="referenceBox" class="referenceBox" tabindex="0" aria-label="选区细化参考图，鼠标移入后按 Ctrl+V 粘贴图片" title="鼠标放在此处，Ctrl+V 粘贴参考图">
+          <div class="referenceHeader">
+            <span>参考图 <span id="referenceCount">（1张）</span></span>
+            <button id="addReferenceButton" class="secondary compact" type="button" title="添加 PNG / JPG / WebP，单张不超过 20 MB；点击提交时才上传">＋ 添加参考图</button>
+            <input id="referenceFileInput" type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" multiple hidden />
+          </div>
+          <div class="selectionReference"><strong>图1 · PS 选区</strong><span>Ctrl+V 添加参考图</span></div>
+          <div id="referenceList" class="referenceList" aria-label="额外参考图" hidden></div>
+          <div id="referenceStatus" class="status" role="status" hidden></div>
+        </section>
+        <label>
+          提示词
+          <textarea id="prompt" rows="5" placeholder="例如：保持图1构图，参考图2材质、图3光影。额外参考图仅用于选区细化。"></textarea>
+        </label>
+        <label class="checkboxField" title="本地识别角落字符：透明处删除，有图像处先局部修补，再尝试 PS 内容识别修复。可能漏检或误判，可关闭；回填后可撤销。">
+          自动清理角落字符
+          <input id="cleanupText" type="checkbox" checked />
+        </label>
+        <button id="submitButton" class="primary">提交选区并生成</button>
+        <details class="layerBox">
+          <summary>AI 分层（并行重绘）</summary>
+          <label>
+            分层模板
+            <select id="layerTemplate"></select>
+          </label>
+          <label>
+            图层（上→下，每行一个）
+            <textarea id="layerList" rows="3" spellcheck="false"></textarea>
+          </label>
+          <button id="guideButton" class="secondary">涂抹指定图层范围（可选）</button>
+          <div id="guideEditor" class="guideEditor" hidden>
+            <div class="guideTools">
+              <span id="guideSwatch" class="swatch"></span>
+              <select id="guideLayer"></select>
+              <button id="guideBrushTool" class="tool active" title="画笔">画</button>
+              <button id="guideEraseTool" class="tool" title="橡皮">擦</button>
+              <input id="guideBrush" type="range" min="4" max="80" value="24" title="笔刷大小" />
+            </div>
+            <canvas id="guideCanvas" class="guideCanvas"></canvas>
+            <div class="guideTools">
+              <button id="guideClear" class="tool wide">清除当前层</button>
+              <button id="guideClearAll" class="tool wide">全部清除</button>
+            </div>
+          </div>
+          <button id="layeredButton" class="primary layered">整图分层</button>
+          <button id="retryLayersButton" class="secondary" hidden>重新取回失败图层</button>
+          <div id="layerStatus" class="status" hidden></div>
+        </details>
+      </section>
+
+      <div id="status" class="status">点击「连接设置」配置平台。</div>
+    </main>
+  </body>
+</html>
+
+

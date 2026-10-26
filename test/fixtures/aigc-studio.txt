@@ -1,0 +1,22 @@
+const IMAGE_MODELS = {
+  Banana: { versions: ['2', '1'], label: 'Banana', modelKeyPrefix: 'Banana' },
+  GPTImage: { versions: ['2'], label: 'GPT Image', modelKeyPrefix: 'gpt-image' },
+  Midjourney: { versions: ['v7'], label: 'Midjourney' },
+  MAIImage: { versions: ['2.5'], label: 'MAI Image', modelKeyPrefix: 'MAI-Image' },
+};
+const IMAGE_VERSION_LABELS = { 'GPTImage:2': 'gpt-image-2' };
+const IMAGE_RESOLUTIONS_MAP = {
+  'Banana:2': ['1k', '2k'], 'Banana:1': ['2k'],
+  'GPTImage:2': ['1k', '2k'], 'Midjourney:v7': ['1k'], 'MAIImage:2.5': [],
+};
+const IMAGE_RESOLUTIONS_DEFAULT = ['1k'];
+const IMAGE_ASPECT_RATIOS = { 'Banana:2': ['1:1', '4:3'], 'GPTImage:2': ['1:1', '3:2'], 'Midjourney:v7': ['1:1'], 'MAIImage:2.5': [] };
+const IMAGE_DEFAULTS = {
+  'Banana:2': { resolution: '1k', aspectRatio: '1:1' },
+  'GPTImage:2': { resolution: '2k', quality: 'high', background: 'auto' },
+  'Midjourney:v7': { resolution: '1k', quality: '1' },
+};
+const IMAGE_QUALITIES = { 'GPTImage:2': ['low', 'high'], 'Midjourney:v7': ['1', '2', '4'] };
+const IMAGE_BACKGROUNDS = { 'GPTImage:2': ['auto', 'opaque', 'transparent'] };
+const IMAGE_BACKGROUND_LABELS = { auto: '自动', opaque: '不透明', transparent: '透明' };
+throw new Error('Remote JavaScript must never execute');

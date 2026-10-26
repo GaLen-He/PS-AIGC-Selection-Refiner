@@ -1,0 +1,9 @@
+{
+  "name": "ps-aigc-selection-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "mock-api": "node tools/mock-aigc-server.js",
+    "test": "node --test"
+  }
+}
