@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'install.ps1') -LibraryOnly
 $outputRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-if (-not $Destination) { $Destination = Join-Path $outputRoot 'AIGC选区提交-整图分层-0.5.30.zip' }
+if (-not $Destination) { $Destination = Join-Path $outputRoot 'AIGC选区提交-整图分层-0.5.31.zip' }
 $Destination = [IO.Path]::GetFullPath($Destination)
 Assert-AigcChild $Destination $outputRoot
 $files = @('安装.bat', '卸载.bat', '回退旧版.bat', 'install.ps1', '安装说明.txt', '开发说明.md',

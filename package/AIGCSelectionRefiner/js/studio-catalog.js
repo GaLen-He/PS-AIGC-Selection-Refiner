@@ -111,16 +111,18 @@
 
   function authorizedImageIds(payload) {
     var ids = [];
+    var hasImageGroup = false;
     if (!payload || !Array.isArray(payload.groups)) throw new Error("平台模型列表返回格式已变化，请重新连接或更新插件。");
     payload.groups.forEach(function (group) {
       if (!group || group.model_type !== "image") return;
+      hasImageGroup = true;
       if (!Array.isArray(group.models)) throw new Error("平台模型列表返回格式已变化，请重新连接或更新插件。");
       group.models.forEach(function (id) {
         if (typeof id !== "string" || !id) throw new Error("平台模型列表返回格式已变化，请更新插件。");
         if (ids.indexOf(id) < 0) ids.push(id);
       });
     });
-    return ids;
+    return hasImageGroup ? ids : null;
   }
 
   function parseStudioCatalog(source, payload) {
@@ -140,7 +142,7 @@
         var key = family + ":" + version;
         var defaults = maps.IMAGE_DEFAULTS[key] || {};
         var parameters = [];
-        if (authorized.indexOf(id) < 0 || models.some(function (model) { return model.id === id; })) return;
+        if ((authorized && authorized.indexOf(id) < 0) || models.some(function (model) { return model.id === id; })) return;
         [
           ["Resolution", "分辨率", "IMAGE_RESOLUTIONS_MAP", "resolution"],
           ["AspectRatio", "画面比例", "IMAGE_ASPECT_RATIOS", "aspectRatio"],
@@ -164,7 +166,7 @@
         models.push({ id: id, name: String(maps.IMAGE_VERSION_LABELS[key] || ((info.label || family) + " " + version)), description: "", parameters: parameters });
       });
     });
-    if (authorized.length && !models.length) throw new Error("Key 已有生图权限，但创作台没有匹配的选区生图模型配置，请更新插件。");
+    if ((!authorized || authorized.length) && !models.length) throw new Error("Key 已有生图权限，但创作台没有匹配的选区生图模型配置，请更新插件。");
     return models;
   }
 

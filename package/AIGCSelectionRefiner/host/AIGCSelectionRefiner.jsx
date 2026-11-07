@@ -551,7 +551,7 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
           groupId: group ? layerIdentity(group) : null, name: layer.name,
           reservationId: job.reservation.id, maskPrepared: !job.reservation.names });
       }
-      job.document.activeChannels = job.channels;
+      if (job.channels) { try { job.document.activeChannels = job.channels; } catch (channelRestoreError) {} }
       restoreSelectedLayers(job.selected);
       job.slot = job.reservation.names ? { slots: slots } : slots[0];
     } catch (error) { job.error = error; }
@@ -577,7 +577,8 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
     var parent = artboard ? findArtboard(document, artboard) : document;
     if (!parent || (artboard && layerIdentity(parent) !== artboard.id)) throw new Error("提交任务的原画板不存在。");
     var selected = selectedLayerIdentities(document);
-    var channels = document.activeChannels;
+    var channels = null;
+    try { channels = document.activeChannels; } catch (channelReadError) {}
     var savedState = document.activeHistoryState;
     var job = { document: document, parent: parent, parentId: artboard ? artboard.id : activeDocumentId(),
       reservation: reservation, selected: selected, channels: channels };
@@ -589,7 +590,7 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
       return job.slot;
     } catch (error) {
       document.activeHistoryState = savedState;
-      document.activeChannels = channels;
+      if (channels) { try { document.activeChannels = channels; } catch (channelRestoreError) {} }
       restoreSelectedLayers(selected);
       throw error;
     } finally { pendingReservation = null; }
@@ -763,7 +764,8 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
   function healResultRegionsNow(layer, regions, target, warnings) {
     var document = app.activeDocument;
     var savedChannel = null;
-    var savedChannels = document.activeChannels;
+    var savedChannels = null;
+    try { savedChannels = document.activeChannels; } catch (channelReadError) {}
     var savedTransparencyLock = null;
     var selectionChanged = false;
     try {
@@ -840,7 +842,7 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
       if (savedChannel) {
         try { savedChannel.remove(); } catch (removeError) {}
       }
-      try { document.activeChannels = savedChannels; } catch (channelError) {}
+      if (savedChannels) { try { document.activeChannels = savedChannels; } catch (channelError) {} }
     }
     return warnings;
   }
@@ -856,7 +858,7 @@ var AIGCSelectionRefiner = AIGCSelectionRefiner || {};
       if (!job.selectionChannelName) throw new Error("原始选区快照缺失，请重新提交任务。");
       try { taskChannel = document.channels.getByName(job.selectionChannelName); }
       catch (missingSnapshot) { throw new Error("原始选区快照已被删除，请重新提交任务。"); }
-      savedChannels = document.activeChannels;
+      try { savedChannels = document.activeChannels; } catch (channelReadError) { savedChannels = null; }
       var hasSelection = false;
       try { hasSelection = !!document.selection.bounds; } catch (noSelection) {}
       if (hasSelection) {

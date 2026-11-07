@@ -604,7 +604,7 @@ function getBackgroundBridge() {
       onReady: function () { if (!recoveryClosing && gatewayClient) resumePendingTasks(gatewayClient, true); } });
     return backgroundBridge;
   } catch (error) {
-    if (error.code === "ENOENT") error = new Error("后台助手安装不完整，请完整解压并运行 0.5.30 安装脚本；不会切换文档回贴。");
+    if (error.code === "ENOENT") error = new Error("后台助手安装不完整，请完整解压并运行 0.5.31 安装脚本；不会切换文档回贴。");
     error.backgroundUnavailable = true;
     throw error;
   }

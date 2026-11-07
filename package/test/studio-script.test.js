@@ -15,3 +15,9 @@ test('accepts hashed studio bundle names', () => {
   const html = '<script src="/aigc/assets/aigc-i18n.js"></script><script src="/aigc/assets/aigc.3fa9c21b.js"></script>';
   assert.strictEqual(catalog.findStudioScript('https://example.test/aigc', html), 'https://example.test/aigc/assets/aigc.3fa9c21b.js');
 });
+
+test('image permission falls back to studio catalog when the key list has no image group', () => {
+  assert.equal(catalog.authorizedImageIds({ groups: [{ model_type: 'chat', models: ['gpt-6'] }] }), null);
+  assert.deepEqual(catalog.authorizedImageIds({ groups: [{ model_type: 'image', models: [] }] }), []);
+  assert.deepEqual(catalog.authorizedImageIds({ groups: [{ model_type: 'image', models: ['a-1'] }] }), ['a-1']);
+});

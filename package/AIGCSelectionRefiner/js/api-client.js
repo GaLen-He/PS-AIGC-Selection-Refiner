@@ -717,7 +717,8 @@
       });
     }
     return client.gatewayRequest(client.endpoints.models, "GET").then(function (response) {
-      if (!studioCatalog.authorizedImageIds(response.data).length) return [];
+      var authorized = studioCatalog.authorizedImageIds(response.data);
+      if (authorized && !authorized.length) return [];
       return publicText(client.endpoints.studio).then(function (html) {
         return publicText(studioCatalog.findStudioScript(client.endpoints.studio, html));
       }).then(function (source) {

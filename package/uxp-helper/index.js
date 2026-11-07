@@ -59,7 +59,7 @@ async function connect() {
     var current = new WebSocket('ws://127.0.0.1:47391/connect?token=' + config.token, 'aigc-return-v1');
     socket = current;
     current.addEventListener('open', function () {
-      current.send(JSON.stringify({ type: 'ready', protocol: 1, version: '0.5.30', photoshop: photoshop.app.version, sessionId: helperSessionId }));
+      current.send(JSON.stringify({ type: 'ready', protocol: 1, version: '0.5.31', photoshop: photoshop.app.version, sessionId: helperSessionId }));
     });
     current.addEventListener('message', function (event) {
       var request;

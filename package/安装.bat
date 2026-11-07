@@ -1,7 +1,7 @@
 @echo off
 setlocal
-title AIGC Plugin Installer 0.5.30
-echo AIGC Plugin 0.5.30 installer
+title AIGC Plugin Installer 0.5.31
+echo AIGC Plugin 0.5.31 installer
 echo Please save your work and CLOSE Photoshop first.
 echo.
 pause

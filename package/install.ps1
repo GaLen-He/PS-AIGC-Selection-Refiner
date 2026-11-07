@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $script:PackageRoot = $PSScriptRoot
-$script:AigcVersion = '0.5.30'
+$script:AigcVersion = '0.5.31'
 $script:CepPayload = @(
   'index.html', 'CSXS\manifest.xml', 'css\styles.css', 'host\AIGCSelectionRefiner.jsx',
   'js\CSInterface.js', 'js\api-client.js', 'js\layer-plan.js', 'js\main.js',
@@ -206,7 +206,7 @@ function Install-AigcPackage([string]$DataRoot) {
     elseif (Test-Path -LiteralPath $paths.Token) { Move-Item -LiteralPath $paths.Token -Destination (Join-Path $transaction 'failed-token.json') }
     throw $failure
   }
-  Write-Host 'Signed CEP 0.5.30 installed and verified. Restart Photoshop manually.'
+  Write-Host 'Signed CEP 0.5.31 installed and verified. Restart Photoshop manually.'
   if ($replaced) { Write-Host ('Old extension removed from the load directory and preserved: ' + $replaced) }
   Write-Host 'The separate experimental UXP helper is NOT signed or verified to load on this computer.'
   Write-Host ('Backup: ' + $state.BackupCep)

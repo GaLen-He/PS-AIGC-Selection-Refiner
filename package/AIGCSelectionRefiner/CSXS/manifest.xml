@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<ExtensionManifest Version="7.0" ExtensionBundleId="com.company.aigc.selection.refiner.bundle" ExtensionBundleVersion="0.5.30" ExtensionBundleName="AIGC选区提交/整图分层" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<ExtensionManifest Version="7.0" ExtensionBundleId="com.company.aigc.selection.refiner.bundle" ExtensionBundleVersion="0.5.31" ExtensionBundleName="AIGC选区提交/整图分层" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <ExtensionList>
-    <Extension Id="com.company.aigc.selection.refiner" Version="0.5.30" />
+    <Extension Id="com.company.aigc.selection.refiner" Version="0.5.31" />
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>
